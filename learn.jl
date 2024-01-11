@@ -5,21 +5,11 @@ using Base.MathConstants
 using PrettyTables
 using Folds
 
-function initialize_network(network_shape)
-  [
-    #  N11   N12   N13   N14
-    [  0.111 0.121 0.131 0.141 # Input 1
-       0.112 0.122 0.132 0.142 # Input 2
-       0.113 0.123 0.133 0.143 # Input 3
-       0.114 0.124 0.134 0.144 # Input 4
-    ],
-     # N21   N22   N23
-    [  0.211 0.221 0.231 # N11
-       0.212 0.222 0.232 # N12
-       0.213 0.223 0.233 # N13
-       0.214 0.224 0.234 # N14
-    ]
-  ]
+function initialize_network(input_sz, output_sz, hidden_layers)
+
+  network_shape = [input_sz; hidden_layers; output_sz]
+  
+  map(rand(x,y) for (x, y) ∈ zip(network_shape[1:end-1], network_shape[2:end]))
 end
 
 sigmoid(x) = 1 / (1 + e^-x)
@@ -200,7 +190,7 @@ function show_sixel(output)
   sixel_encode(output_rgb)
 end
 
-(nn, train, infer) = network(network_shape=(2,3), embedding=embedding, training=training, show_fn=show_sixel, ϵ=0.05)
+(nn, train, infer) = network(network_shape=(3,4), embedding=embedding, training=training, show_fn=show_sixel, ϵ=0.05)
 
 for i ∈ 1:10
   for j ∈ 1:20000
