@@ -11,10 +11,17 @@ sigmoid(x) = 1 / (1 + e^-x)
 sigmoid_derivative(x) = x * ( 1 - x )
 squared_difference(target, actual) = 1//2 * sum( ( target .- actual ) .^2 )
 squared_difference_derivative(target, actual) = -( target .- actual )
+cross_entropy(target, actual) = -sum( target .* log.(actual) )
+cross_entropy_derivative(target, actual) = actual .- target
 
 activation_fns = Dict(
   "sigmoid" => (sigmoid, sigmoid_derivative),
   "softmax" => (softmax, softmax_derivative)
+)
+
+cost_fns = Dict(
+  "squared-difference" => (squared_difference, squared_difference_derivative),
+  "cross-entropy" => (cross_entropy, cross_entropy_derivative),
 )
 
 function fetch!(dict, key, err="key not found")
@@ -50,10 +57,6 @@ function initialize_network(input_sz, layer_configs)
   layers
 end
 
-cost_fns = Dict(
-  "squared-difference" => (squared_difference, squared_difference_derivative)
-)
-
 function show_network(nn)
   max_length = maximum(length.(nn))
   padded_vecs = [vcat(vec, fill(NaN, max_length - length(vec))) for vec in reverse(nn)]
@@ -75,12 +78,11 @@ function apply_layer(layer, prev_values)
   end
 end
 
-function build_nn(;network_layers, embedding, training, show_fn=show_fn, activation_fn="sigmoid", cost_fn="squared-difference", ϵ=0.01)
+function build_nn(;network_layers, embedding, training, show_fn=show_fn, cost_fn="squared-difference", ϵ=0.01)
   apply_embedding(k) = embedding[k]
 
   input_sz = length(apply_embedding(rand(training)[begin]))
   nn = initialize_network(input_sz, network_layers)
-  (activation, activation_derivative) = fetch!(activation_fns, activation_fn, "unknown activation function: $activation_fn")
   (cost, cost_derivative) = fetch!(cost_fns, cost_fn, "unknown cost function: $cost_fn")
 
   grammar = keys(embedding)
@@ -142,7 +144,7 @@ function build_nn(;network_layers, embedding, training, show_fn=show_fn, activat
 
       # By definition, ∂E∂yj = ∂E∂yi from the previous layer
       ∂E∂yj = acc[end].∂E∂yi
-      ∂E∂zj = activation_derivative.(yj) .* ∂E∂yj
+      ∂E∂zj = layer.activation_derivative.(yj) .* ∂E∂yj
 
       # Calculate ∂E∂yi, which will be `∂E∂yj` for the next iteration
       (∂E∂yi, layer_adj) = if layer.config[1] == "softmax" 
@@ -189,62 +191,3 @@ function build_nn(;network_layers, embedding, training, show_fn=show_fn, activat
 
   (nn, train, infer)
 end
-
-# This could probably be made using an identity matrix and an index paramter
-embedding = Dict(
-  "red" =>      [1, 0, 0, 0],
-  "green" =>    [0, 1, 0, 0],
-  "blue" =>     [0, 0, 1, 0],
-  "deep-red" => [0, 0, 0, 1]
-)
-
-## This section is about training
-
-# So first, we need to build some tuples to learn towards
-# It's pretty funny since there aren't a lot of different examples
-# Available given our grammer, but it doesn't mean we can't ain't learn.
-# Also, since our grammar is so limited, we'll probably end up including
-# all of our training cases in our results. But that's okay, this is all
-# a toy at this phase anyway.
-training = Dict(
-  "red" => [0.9, 0.2, 0.2],
-  "green" => [0.2, 0.9, 0.2],
-  "blue" => [0.2, 0.2, 0.9],
-  "deep-red" =>  [0.8, 0.1, 0.1]
-)
-
-function show_sixel(output)
-  # TODO: Do we want to do this all at once or singularly?
-
-  # TODO: We probably don't want to use a decoder at all
-  output_enc = [UInt32(UInt8(round(a[1] * 0xff))) << 16 + UInt32(UInt8(round(a[2] * 0xff))) << 8 + UInt32(UInt8(round(a[3] * 0xff))) for a ∈ output]
-
-  # Show as large pixels for now
-  sz = 6 * 6
-  magnified = reshape(collect(Iterators.flatten(map(x -> x .* ones(UInt32, sz, sz), output_enc))), sz, sz * length(output_enc))
-  rgb(x) = reinterpret(RGB24, x)
-  output_rgb = rgb.(magnified)
-  sixel_encode(output_rgb)
-end
-
-(nn, train, infer) = build_nn(
-  network_layers=[
-    ("sigmoid", 4),
-    ("sigmoid", 3),
-    ("softmax", 3)
-  ],
-  embedding=embedding,
-  training=training,
-  show_fn=show_sixel,
-  ϵ=0.05
-)
-
-for i ∈ 1:10
-  for j ∈ 1:20000
-    global nn = train(nn)
-  end
-  
-  infer(nn, ["red", "green", "blue", "deep-red"])
-end
-
-show(nn)
