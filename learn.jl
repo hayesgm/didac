@@ -123,53 +123,64 @@ function build_nn(;network_layers, embedding, training, show_fn=show_fn, cost_fn
     # Now let's train, we have an output and a target. So let's use back propagation to figure out how our weights should be updated.
 
     # First, let's calculate our overall error
-    error = cost(target, output_with_hidden[end])
-    ∂E∂yend=cost_derivative(target, output_with_hidden[end])
+    actual = output_with_hidden[end]
+    error = cost(target, actual)
+    ∂E∂yifinal=cost_derivative(target, actual)
+    ∂E∂zifinal = nn[end].activation_derivative.(actual) .* ∂E∂yifinal
 
-    function backpropagate(acc, (j, (layer, (yi, yj))))
+    function derive_gradients((∂E∂yis, ∂E∂zis), (layer, yprev))
       # This reduction works backwards through the outputs of the
       # neural net. Each step computes the weight changes for that
       # layer and then propagates backwards. The result is several
       # named vectors (∂E∂yj=...,∂E∂zj=...,∆weightj=...,weightj=...)
       
-      # Note: y refers to current layer, i to previous layer
+      # Note: i refers to current layer, y to next layer up
+      # Note: Due to backpropagation, y was calculated before i
 
       if debug
-        display("acc=$acc")
-        display("j=$j")
-        display("yj=$yj")
-        display("yi=$yi")
         display("layer=$layer")
+        display("yi=$yi")
+        display("∂E∂yis=$∂E∂yis")
+        display("∂E∂zis=$∂E∂zis")
       end
 
-      # By definition, ∂E∂yj = ∂E∂yi from the previous layer
-      ∂E∂yj = acc[end].∂E∂yi
-      ∂E∂zj = layer.activation_derivative.(yj) .* ∂E∂yj
+      ∂E∂zj=∂E∂zis[end]
 
       # Calculate ∂E∂yi, which will be `∂E∂yj` for the next iteration
-      (∂E∂yi, layer_adj) = if layer.config[1] == "softmax" 
+      ∂E∂yi = if layer.config[1] == "softmax" 
         # I need to mull this, but I believe since there are no weights
         # we just pass this through directly?
-        (∂E∂zj, layer)
+        ∂E∂zj
       else
         # This is the "caching" part of the back propagating algorithm
         # that uses previously calculated values
-        ∂E∂yi = [ sum(neuron .* ∂E∂zj) for neuron ∈ eachrow(layer.weights) ]
-        ∆weightj=reshape([-ϵ*i*j for i in ∂E∂zj for j in yi], size(layer.weights))
+        [ sum(neuron .* ∂E∂zj) for neuron ∈ eachrow(layer.weights) ]
+      end
+
+      ∂E∂zi = layer.activation_derivative.(yprev) .* ∂E∂yi
+
+      ([∂E∂yis; [∂E∂yi]], [∂E∂zis; [∂E∂zi]])
+    end
+
+    layer_prev_values = zip(nn, output_with_hidden[1:end-1])
+
+    (∂E∂yis_rev, ∂E∂zis_rev) = Folds.reduce(derive_gradients, Iterators.reverse(layer_prev_values); init=([∂E∂yifinal], [∂E∂zifinal]))
+    ∂E∂yis=[Iterators.reverse(∂E∂yis_rev)...]
+    ∂E∂zis=[Iterators.reverse(∂E∂zis_rev)...]
+
+    function reweight_layer(((layer, yi), ∂E∂zi))
+      if layer.config[1] == "softmax"
+        layer
+      else
+        ∆weightj=reshape([-ϵ*i*j for i in ∂E∂zi for j in yi], size(layer.weights))
         weightj_adj=layer.weights .+ ∆weightj
         layer_adj=(; layer..., weights=weightj_adj)
 
-        (∂E∂yi, layer_adj)
+        layer_adj
       end
-
-      [acc; (∂E∂yi=∂E∂yi,∂E∂zj=∂E∂zj,layer_adj=layer_adj)]
     end
 
-    output_pairs = zip(nn, zip(output_with_hidden[1:end-1], output_with_hidden[2:end]))
-
-    res = Folds.reduce(backpropagate, Iterators.reverse(enumerate(output_pairs)); init=[(∂E∂yi=∂E∂yend,)])
-
-    map(res -> res.layer_adj, reverse(res[2:end]))
+    map(reweight_layer, zip(layer_prev_values, ∂E∂zis[2:end]))
   end
 
   function infer(nn, input)
