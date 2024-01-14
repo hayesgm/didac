@@ -35,19 +35,37 @@ end
 
 # TODO: Not always rand weights
 function initialize_layer((layers, prev_sz), layer_config)
-  activation_fn = layer_config[1]
-
-  (layer_sz, weights, scaled) = if activation_fn == "softmax"
+  (layer_sz, weights, scaled) = if layer_config.type == "softmax"
     (prev_sz, nothing, true)
   else
-    sz = layer_config[2]
+    sz = layer_config.nodes
 
     (sz, rand(prev_sz, sz), false)
   end
 
+  activation_fn = layer_config.type # currently 1:1
   (activation, activation_derivative) = fetch!(activation_fns, activation_fn, "unknown activation function: $activation_fn")
 
-  layer = (config=layer_config, weights=weights, activation=activation, activation_derivative=activation_derivative, scaled=scaled)
+  apply_weight_constraints = if :constraints in fieldnames(typeof(layer_config))
+    function(∂E∂wijs)
+      for ((x1,y1),(x2,y2)) in layer_config.constraints
+        ∂E∂wijs[x1,y1] = ∂E∂wijs[x2,y2] =
+          ( ( ∂E∂wijs[x1,y1] + ∂E∂wijs[x2,y2] ) / 2 )
+      end
+      ∂E∂wijs
+    end
+  else
+    x -> x
+  end
+
+  layer = (
+    config=layer_config,
+    weights=apply_weight_constraints(weights),
+    activation=activation,
+    activation_derivative=activation_derivative,
+    scaled=scaled,
+    apply_weight_constraints=apply_weight_constraints
+  )
 
   ([layers; [layer]], layer_sz)
 end
@@ -157,7 +175,7 @@ function build_nn(;network_layers, embedding, training, show_fn=show_fn, cost_fn
 
         ∂E∂zj=∂E∂zis[end]
 
-        ∂E∂wij = if layer.config[1] == "softmax"
+        ∂E∂wij = if layer.config.type == "softmax"
           nothing
         else
           reshape([zj*y for zj in ∂E∂zj for y in yprev], size(layer.weights))
@@ -165,7 +183,7 @@ function build_nn(;network_layers, embedding, training, show_fn=show_fn, cost_fn
 
         # Calculate ∂E∂yi, which will be `∂E∂yj` for the next iteration
         # 4 in length
-        ∂E∂yi = if layer.config[1] == "softmax" 
+        ∂E∂yi = if layer.config.type == "softmax" 
           # I need to mull this, but I believe since there are no weights
           # we just pass this through directly?
           # Note: this is really ∂zj∂yi
@@ -203,7 +221,7 @@ function build_nn(;network_layers, embedding, training, show_fn=show_fn, cost_fn
       if layer.weights == nothing
         layer
       else
-        ∆weight=-ϵ .* mean(∂E∂wijs)
+        ∆weight=-ϵ .* layer.apply_weight_constraints(mean(∂E∂wijs))
         weights_adj=layer.weights .+ ∆weight
 
         (; layer..., weights=weights_adj)

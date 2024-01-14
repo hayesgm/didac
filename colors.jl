@@ -39,9 +39,12 @@ end
 
 (nn, train, infer) = build_nn(
   network_layers=[
-    ("sigmoid", 4),
-    ("sigmoid", 3),
-    # ("softmax", 3)
+    (type="sigmoid", nodes=4),
+    (type="sigmoid", nodes=3, constraints=[
+      ((1,1),(2,2))
+      ((1,2),(1,3))
+    ]),
+    # ("softmax"; nodes=3)
   ],
   embedding=embedding,
   training=training,
