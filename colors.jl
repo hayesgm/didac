@@ -50,11 +50,12 @@ end
 )
 
 for i ∈ 1:10
-  for j ∈ 1:1000
+  for j ∈ 1:2000
     global nn = train(nn)
   end
   
-  infer(nn, ["red", "green", "blue", "deep-red"])
+  error = infer(nn, ["red", "green", "blue", "deep-red"])
+  display("error=$error")
 end
 
 show(nn)
