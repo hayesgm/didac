@@ -41,7 +41,7 @@ end
   network_layers=[
     ("sigmoid", 4),
     ("sigmoid", 3),
-    ("softmax", 3)
+    # ("softmax", 3)
   ],
   embedding=embedding,
   training=training,
@@ -50,7 +50,7 @@ end
 )
 
 for i ∈ 1:10
-  for j ∈ 1:20000
+  for j ∈ 1:1000
     global nn = train(nn)
   end
   

@@ -128,7 +128,7 @@ function build_nn(;network_layers, embedding, training, show_fn=show_fn, cost_fn
     ∂E∂yifinal=cost_derivative(target, actual)
     ∂E∂zifinal = nn[end].activation_derivative.(actual) .* ∂E∂yifinal
 
-    function derive_gradients((∂E∂yis, ∂E∂zis), (layer, yprev))
+    function derive_gradients((∂E∂yis, ∂E∂zis, ∂E∂wijs), (layer, yprev))
       # This reduction works backwards through the outputs of the
       # neural net. Each step computes the weight changes for that
       # layer and then propagates backwards. The result is several
@@ -139,17 +139,26 @@ function build_nn(;network_layers, embedding, training, show_fn=show_fn, cost_fn
 
       if debug
         display("layer=$layer")
-        display("yi=$yi")
         display("∂E∂yis=$∂E∂yis")
         display("∂E∂zis=$∂E∂zis")
+        display("∂E∂wijs=$∂E∂wijs")
+        display("yprev=$yprev")
       end
 
       ∂E∂zj=∂E∂zis[end]
 
+      ∂E∂wij = if layer.config[1] == "softmax"
+        nothing
+      else
+        reshape([zj*y for zj in ∂E∂zj for y in yprev], size(layer.weights))
+      end
+
       # Calculate ∂E∂yi, which will be `∂E∂yj` for the next iteration
+      # 4 in length
       ∂E∂yi = if layer.config[1] == "softmax" 
         # I need to mull this, but I believe since there are no weights
         # we just pass this through directly?
+        # Note: this is really ∂zj∂yi
         ∂E∂zj
       else
         # This is the "caching" part of the back propagating algorithm
@@ -157,30 +166,35 @@ function build_nn(;network_layers, embedding, training, show_fn=show_fn, cost_fn
         [ sum(neuron .* ∂E∂zj) for neuron ∈ eachrow(layer.weights) ]
       end
 
+      # display("∂E∂yi=$∂E∂yi")
+
+      # For each of these 4
       ∂E∂zi = layer.activation_derivative.(yprev) .* ∂E∂yi
 
-      ([∂E∂yis; [∂E∂yi]], [∂E∂zis; [∂E∂zi]])
+      ([∂E∂yis; [∂E∂yi]], [∂E∂zis; [∂E∂zi]], [∂E∂wijs; [∂E∂wij]])
     end
 
     layer_prev_values = zip(nn, output_with_hidden[1:end-1])
 
-    (∂E∂yis_rev, ∂E∂zis_rev) = Folds.reduce(derive_gradients, Iterators.reverse(layer_prev_values); init=([∂E∂yifinal], [∂E∂zifinal]))
-    ∂E∂yis=[Iterators.reverse(∂E∂yis_rev)...]
-    ∂E∂zis=[Iterators.reverse(∂E∂zis_rev)...]
+    (∂E∂yis_rev, ∂E∂zis_rev, ∂E∂wijs_rev) = Folds.reduce(derive_gradients, Iterators.reverse(layer_prev_values); init=([∂E∂yifinal], [∂E∂zifinal], [nothing]))
+    ∂E∂yis=Iterators.reverse(∂E∂yis_rev)
+    ∂E∂zis=Iterators.reverse(∂E∂zis_rev)
+    ∂E∂wijs=Iterators.reverse(∂E∂wijs_rev)
 
-    function reweight_layer(((layer, yi), ∂E∂zi))
-      if layer.config[1] == "softmax"
+    function reweight((layer, ∂E∂wij))
+      if ∂E∂wij == nothing
         layer
       else
-        ∆weightj=reshape([-ϵ*i*j for i in ∂E∂zi for j in yi], size(layer.weights))
-        weightj_adj=layer.weights .+ ∆weightj
-        layer_adj=(; layer..., weights=weightj_adj)
+        ∆weight=-ϵ .* ∂E∂wij
+        weights_adj=layer.weights .+ ∆weight
 
-        layer_adj
+        (; layer..., weights=weights_adj)
       end
     end
 
-    map(reweight_layer, zip(layer_prev_values, ∂E∂zis[2:end]))
+    # display("∂E∂wijs=$([∂E∂wijs...])")
+
+    [map(reweight, zip(nn, ∂E∂wijs))...]
   end
 
   function infer(nn, input)
