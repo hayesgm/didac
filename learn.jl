@@ -6,12 +6,15 @@ using PrettyTables
 using Folds
 using Statistics
 
+# Activation Functions
 softmax(x) = e^x
 softmax_derivative(x) = x * (1 - x) # TODO: Fix this up
 relu(x) = x > 0 ? x : 0
 relu_derivative(x) = x > 0 ? 1 : 0
 sigmoid(x) = 1 / (1 + e^-x)
 sigmoid_derivative(x) = x * (1 - x)
+
+# Cost Functions
 squared_difference(target, actual) = 1 // 2 * sum((target .- actual) .^ 2)
 squared_difference_derivative(target, actual) = -(target .- actual)
 cross_entropy(target, actual) = -sum(target .* log.(actual))
@@ -44,16 +47,16 @@ function get_opt(opts, key, default)
   end
 end
 
+has_opt(opts, key) = opts !== nothing && key in fieldnames(typeof(opts))
+
 # TODO: Not always rand weights
 function initialize_layer((layers, layer_num, prev_sz, network_config), layer_config)
   (layer_sz, weights, scaled) = if layer_config.type == "softmax"
     (prev_sz, nothing, true)
   else
     sz = layer_config.nodes
-
-    if false && get_opt(network_config, :deterministic, false)
-      matrix = [5 6 7; 8 9 10]
-      (sz, matrix, false)
+    if has_opt(network_config, :weights)
+      (sz, network_config.weights[layer_num], false)
     else
       (sz, rand(prev_sz, sz), false)
     end
@@ -169,10 +172,10 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       # First, let's calculate our overall error
       actual = output_with_hidden[end]
       error = cost(target, actual)
-      ∂E∂yifinal = cost_derivative(target, actual)
-      ∂E∂zifinal = nn[end].activation_derivative.(actual) .* ∂E∂yifinal
+      # ∂E∂yifinal = 
+      # ∂E∂zifinal = nn[end].activation_derivative.(actual) .* ∂E∂yifinal
 
-      function backpropagate((∂E∂yis, ∂E∂zis, ∂E∂wijs), (layer, yprev))
+      function backpropagate((∂E∂yjs, ∂E∂zjs, ∂E∂wijs, prev_layer), ((j, layer), yj, yi))
         # This reduction works backwards through the outputs of the
         # neural net. Each step computes the weight changes for that
         # layer and then propagates backwards. The result is several
@@ -182,45 +185,61 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
         # Note: Due to backpropagation, y was calculated before i
 
         if debug
+          display("j=$j")
           display("layer=$layer")
-          display("∂E∂yis=$∂E∂yis")
-          display("∂E∂zis=$∂E∂zis")
+          display("prev_layer=$prev_layer")
+          display("∂E∂yjs=$∂E∂yjs")
+          display("∂E∂zjs=$∂E∂zjs")
           display("∂E∂wijs=$∂E∂wijs")
-          display("yprev=$yprev")
+          display("yj=$yj")
+          display("yi=$yi")
         end
 
-        ∂E∂zj = ∂E∂zis[end]
+        ∂E∂yj = if prev_layer === nothing
+          # Output layer's gradient is defined by the cost function
+          cost_derivative(target, yj)
+        else
+          # Other layer's are defined by backprop from the previous layer
+          ∂E∂zk = ∂E∂zjs[end]
+
+          # Calculate ∂E∂yj, which will be `∂E∂yk` for the next iteration
+          if prev_layer.config.type == "softmax"
+            # I need to mull this, but I believe since there are no weights
+            # we just pass this through directly?
+            # Note: this is really ∂zj∂yi
+            ∂E∂zk
+          else
+            # This is the "caching" part of the back propagating algorithm
+            # that uses previously calculated values
+            # There might be room to make this comprehension even
+            # a little faster.
+            [dot(neuron, ∂E∂zk) for neuron ∈ eachrow(prev_layer.weights)]
+          end
+        end
+
+        # display("∂E∂yj=$∂E∂yj")
+
+        # For each of these 4
+        ∂E∂zj = layer.activation_derivative.(yj) .* ∂E∂yj
+
+        # display("∂E∂zj=$∂E∂zj")
 
         ∂E∂wij = if layer.config.type == "softmax"
           nothing
         else
-          reshape([zj * y for zj in ∂E∂zj for y in yprev], size(layer.weights))
+          yi * ∂E∂zj'
         end
 
-        # Calculate ∂E∂yi, which will be `∂E∂yj` for the next iteration
-        # 4 in length
-        ∂E∂yi = if layer.config.type == "softmax"
-          # I need to mull this, but I believe since there are no weights
-          # we just pass this through directly?
-          # Note: this is really ∂zj∂yi
-          ∂E∂zj
-        else
-          # This is the "caching" part of the back propagating algorithm
-          # that uses previously calculated values
-          [sum(neuron .* ∂E∂zj) for neuron ∈ eachrow(layer.weights)]
-        end
+        # display("size(∂E∂wij)=$(size(∂E∂wij))")
 
-        # display("∂E∂yi=$∂E∂yi")
-
-        # For each of these 4
-        ∂E∂zi = layer.activation_derivative.(yprev) .* ∂E∂yi
-
-        ([∂E∂yis; [∂E∂yi]], [∂E∂zis; [∂E∂zi]], [∂E∂wijs; [∂E∂wij]])
+        ([∂E∂yjs; [∂E∂yj]], [∂E∂zjs; [∂E∂zj]], [∂E∂wijs; [∂E∂wij]], layer)
       end
 
-      layer_prev_values = zip(nn, output_with_hidden[1:end-1])
+      layer_values = zip(enumerate(nn), output_with_hidden[2:end], output_with_hidden[1:end-1])
 
-      (∂E∂yis_rev, ∂E∂zis_rev, ∂E∂wijs_rev) = Folds.reduce(backpropagate, Iterators.reverse(layer_prev_values); init=([∂E∂yifinal], [∂E∂zifinal], [nothing]))
+      # display("layer_values=$([layer_values...])")
+
+      (∂E∂yis_rev, ∂E∂zis_rev, ∂E∂wijs_rev) = Folds.reduce(backpropagate, Iterators.reverse(layer_values); init=([], [], [], nothing))
       ∂E∂yis = Iterators.reverse(∂E∂yis_rev)
       ∂E∂zis = Iterators.reverse(∂E∂zis_rev)
       ∂E∂wijs = Iterators.reverse(∂E∂wijs_rev)
@@ -232,11 +251,15 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
 
     gradient_layers = [[gradient[i] for gradient in gradients] for i in 1:length(gradients[1])]
 
+    # display("nn=$nn")
+    # display("gradient_layers=$gradient_layers")
+    # display("gradient_layers_sz=$(map(x -> size(x[1]), gradient_layers))")
+
     function reweight((layer, ∂E∂wijs))
-      # display("∂E∂wijs=$∂E∂wijs")
       if layer.weights == nothing
         layer
       else
+        # display("weights=$(layer.weights),∂E∂wijs=$(mean(∂E∂wijs))")
         ∆weight = -ϵ .* layer.apply_weight_constraints(mean(∂E∂wijs))
         weights_adj = layer.weights .+ ∆weight
 

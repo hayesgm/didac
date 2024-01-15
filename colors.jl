@@ -37,23 +37,25 @@ function show_sixel(output)
   sixel_encode(output_rgb)
 end
 
+# Note: mixed layers is producing the wrong answer
+#       which means we're likely applying the wrong
+#       derivative function.
 (nn, train, infer) = build_nn(
   network_layers=[
-    (type="sigmoid", nodes=4),
-    (type="sigmoid", nodes=3, constraints=[
-      ((1,1),(2,2))
-      ((1,2),(1,3))
-    ]),
-    # ("softmax"; nodes=3)
+    (type="relu", nodes=4),
+    (type="relu", nodes=3),
+    (type="relu", nodes=3),
+    (type="softmax", nodes=3)
   ],
   embedding=embedding,
   training=training,
   show_fn=show_sixel,
-  ϵ=0.05
+  ϵ=0.05,
+  network_config=(;deterministic=true)
 )
 
 for i ∈ 1:10
-  for j ∈ 1:2000
+  for j ∈ 1:20000
     global nn = train(nn)
   end
   
