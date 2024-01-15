@@ -6,6 +6,8 @@ using PrettyTables
 using Folds
 using Statistics
 
+# Next items: 1- dropout, 2- RNN
+
 # Activation Functions
 softmax(x) = e^x
 softmax_derivative(x) = x * (1 - x) # TODO: Fix this up

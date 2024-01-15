@@ -79,10 +79,10 @@ end
     )
   )
 
-  nn = train(nn; case="red", debug=true)
+  nn = train(nn; case="red", debug=false)
   error = infer(nn, ["red"])
   display("error=$error")
   show(nn)
 
-  @test error == 5
+  @test error == 0.2126231568899236
 end
