@@ -1,20 +1,20 @@
-include("learn.jl")
+include("../learn.jl")
 
 # This could probably be made using an identity matrix and an index paramter
 embedding = Dict(
-  "dog" =>    [1, 0, 0, 0],
-  "cat" =>    [0, 1, 0, 0],
-  "house" =>  [0, 0, 1, 0],
-  "boat" =>   [0, 0, 0, 1]
+  "dog" => [1, 0, 0, 0],
+  "cat" => [0, 1, 0, 0],
+  "house" => [0, 0, 1, 0],
+  "boat" => [0, 0, 0, 1]
 )
 
 inverted_embedding = Dict(v => k for (k, v) in embedding)
 
 training = Dict(
-  "dog" =>    [0, 1, 0, 0],
-  "cat" =>    [1, 0, 0, 0],
-  "house" =>  [0, 0, 0, 1],
-  "boat" =>   [0, 0, 1, 0]
+  "dog" => [0, 1, 0, 0],
+  "cat" => [1, 0, 0, 0],
+  "house" => [0, 0, 0, 1],
+  "boat" => [0, 0, 1, 0]
 )
 
 function get_word(vector)
@@ -30,8 +30,6 @@ function show_word(output)
   display(get_word.(output))
 end
 
-# TODO: This needs to use the cross-entropy function
-# But otherwise, we're basically set
 (nn, train, infer) = build_nn(
   network_layers=[
     (type="sigmoid", nodes=4),
@@ -49,7 +47,7 @@ for i ∈ 1:10
   for j ∈ 1:10000
     global nn = train(nn)
   end
-  
+
   infer(nn, ["dog", "cat", "house", "boat"])
 end
 

@@ -1,10 +1,10 @@
-include("learn.jl")
+include("../learn.jl")
 
 # This could probably be made using an identity matrix and an index paramter
 embedding = Dict(
-  "red" =>      [1, 0, 0, 0],
-  "green" =>    [0, 1, 0, 0],
-  "blue" =>     [0, 0, 1, 0],
+  "red" => [1, 0, 0, 0],
+  "green" => [0, 1, 0, 0],
+  "blue" => [0, 0, 1, 0],
   "deep-red" => [0, 0, 0, 1]
 )
 
@@ -20,7 +20,7 @@ training = Dict(
   "red" => [0.9, 0.2, 0.2],
   "green" => [0.2, 0.9, 0.2],
   "blue" => [0.2, 0.2, 0.9],
-  "deep-red" =>  [0.8, 0.1, 0.1]
+  "deep-red" => [0.8, 0.1, 0.1]
 )
 
 function show_sixel(output)
@@ -37,28 +37,24 @@ function show_sixel(output)
   sixel_encode(output_rgb)
 end
 
-# Note: mixed layers is producing the wrong answer
-#       which means we're likely applying the wrong
-#       derivative function.
 (nn, train, infer) = build_nn(
   network_layers=[
     (type="relu", nodes=4),
     (type="relu", nodes=3),
-    (type="relu", nodes=3),
-    (type="softmax", nodes=3)
+    (type="relu", nodes=3)
   ],
   embedding=embedding,
   training=training,
   show_fn=show_sixel,
   ϵ=0.05,
-  network_config=(;deterministic=true)
+  network_config=(;)
 )
 
 for i ∈ 1:10
-  for j ∈ 1:20000
+  for j ∈ 1:10000
     global nn = train(nn)
   end
-  
+
   error = infer(nn, ["red", "green", "blue", "deep-red"])
   display("error=$error")
 end
