@@ -45,9 +45,9 @@ end
 
 (nn, train, infer) = build_nn(
   network_layers=[
-    (type="sigmoid", nodes=2, recurrent="l3-context", tag="l2-hidden"),
-    (type="sigmoid", nodes=2, feedback=true, tag="l3-context"),
-    (type="sigmoid", nodes=4, tag="l4-output")
+    (type="sigmoid", nodes=2, recurrent="l2-context", tag="l1-hidden"),
+    (type="sigmoid", nodes=2, feedback=true, tag="l2-context"),
+    (type="sigmoid", nodes=3, tag="l3-output")
   ],
   recurrent=true,
   embedding=embedding,
@@ -63,8 +63,8 @@ display(nn)
 #     global nn = train(nn)
 #   end
 
-#   error = infer(nn, ["red", "green", "blue", "deep-red"])
-#   display("error=$error")
+err = infer(nn, ["continue", "continue", "continue"])
+display("err=$err")
 # end
 
 # show(nn)

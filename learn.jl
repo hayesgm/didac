@@ -91,26 +91,51 @@ end
 
 has_opt(opts, key) = opts !== nothing && key in fieldnames(typeof(opts))
 
-function initialize_layer((layers, layer_num, prev_sz, network_config), layer_config)
-  # In a RNN, we need to track a previous activation
-  # we're going to track it with the RNN. When we build
-  # the RNN, we need to build a base activation. For now
-  # that's going to be random.
+"""
+    initialize_layer((layers, layer_num, prev_sz, network_config), layer_config)
 
+Build a layer as part of a neural net. For use in reduction from `initialize_network`.
+"""
+function initialize_layer((layers, layer_num, prev_sz, layer_sizes, network_config), (tag, layer_config))
+  # We want to figure out the layer size, since we'll need to know
+  # how big the layer is if it's fully connected to the next layer.
+  #
+  # Additionally, we get the weights from config or randomize them.
+  #
+  # `scaled` is our current cheat for use in layers like softmax
+  # where we need to divide by the activation of the entire layer. 
   (layer_sz, weights, scaled) = if layer_config.type == "softmax"
     (prev_sz, nothing, true)
   else
     sz = layer_config.nodes
+    total_prev_sz = if has_opt(layer_config, :recurrent)
+      recurrent_sz = fetch!(layer_sizes, layer_config.recurrent, "unknown recurrent layer `$(layer_config.recurrent)`")
+
+      # For a recurrent net, we need weights from both
+      # our input layer and the recurrent layer
+      prev_sz + recurrent_sz
+    else
+      prev_sz
+    end
+
     if has_opt(network_config, :weights)
+      weights = network_config.weights[layer_num]
+      if size(weights) !== (total_prev_sz, sz)
+        error("invalid weights for layer $tag, expected size=$((total_prev_sz, sz)), got weight matrix of size=$(size(weights))")
+      end
+
+      # Use the weights if specified
       (sz, network_config.weights[layer_num], false)
     else
-      (sz, rand(prev_sz, sz), false)
+      # Otherwise randomize them
+      (sz, rand(total_prev_sz, sz), false)
     end
   end
 
-  activation_fn = layer_config.type # currently 1:1
+  activation_fn = layer_config.type # currently layer type is 1:1 with activation functions
   (activation, activation_derivative) = fetch!(activation_fns, activation_fn, "unknown activation function: $activation_fn")
 
+  # A function to help us apply weight constraints after weight adjustments
   apply_weight_constraints = if :constraints in fieldnames(typeof(layer_config))
     function (∂E∂wijs)
       for ((x1, y1), (x2, y2)) in layer_config.constraints
@@ -123,16 +148,11 @@ function initialize_layer((layers, layer_num, prev_sz, network_config), layer_co
     x -> x
   end
 
-  tag = get_opt(layer_config, :tag, "layer-$layer_num")
-
-  initial_activation = if get_opt(layer_config, :feedback, false)
-    activation_fn.(rand(prev_sz, sz))
-  else
-    nothing
-  end
-
-  recurrent_weights = if get_opt(layer_config, :recurrent, false)
-    rand(size(weights))
+  # For layers which can be fed back in an RNN, we need to build
+  # an initial activation. Currently, we simply apply random
+  # inputs to the activation function.
+  initial_activation = if has_opt(layer_config, :feedback)
+    activation.(rand(sz))
   else
     nothing
   end
@@ -142,39 +162,60 @@ function initialize_layer((layers, layer_num, prev_sz, network_config), layer_co
     initial_activation=initial_activation,
     config=layer_config,
     weights=apply_weight_constraints(weights),
-    recurrent_weights=recurrent_weights,
+    recurrent=get_opt(layer_config, :recurrent, nothing),
+    feedback=get_opt(layer_config, :feedback, false),
     activation=activation,
     activation_derivative=activation_derivative,
     scaled=scaled,
     apply_weight_constraints=apply_weight_constraints
   )
 
-  ([layers; [layer]], layer_num + 1, layer_sz, network_config)
+  ([layers; [layer]], layer_num + 1, layer_sz, layer_sizes, network_config)
 end
 
+"""
+    initialize_network(input_sz, layer_configs; network_config=nothing)
+
+Build a neural net from layer configurations.
+
+Given the parameters of the layers, which may include theirs weights,
+builds the layers that will be part of a neural net, which itself
+is simply a collection of these layers. If weights aren't specified,
+they will generated randomly. We also suss out certain items like the
+activation function, to make it easier to call when we're inferring
+a value from the net.
+
+# Examples
+```julia-repl
+julia> initialize_network(2, [(type="sigmoid", nodes=2, tag="l1-hidden")])
+42 # TODO
+```
+"""
 function initialize_network(input_sz, layer_configs; network_config=nothing)
-  (layers, _) = Folds.reduce(initialize_layer, layer_configs, init=([], 1, input_sz, network_config))
+  # Tag each layer with a friendly name
+  tagged_layer_configs = [(get_opt(layer_config, :tag, "layer-$i"), layer_config) for (i, layer_config) in enumerate(layer_configs)]
+
+  # Tally each layer's node size in a dict keyed by tags
+  layer_sizes = Dict([(tag, layer_config.nodes) for (tag, layer_config) in tagged_layer_configs])
+
+  # Build each layer in a big reduction
+  (layers, _) = Folds.reduce(initialize_layer, tagged_layer_configs, init=([], 1, input_sz, layer_sizes, network_config))
 
   layers
 end
 
-function show_network(nn)
-  max_length = maximum(length.(nn))
-  padded_vecs = [vcat(vec, fill(NaN, max_length - length(vec))) for vec in reverse(nn)]
-  mat = hcat(padded_vecs...)'
-  pretty_table(mat, header=repeat(["Column"], max_length))
-end
+"""
+  apply_layer(layer, input_values)
 
-function apply_layer(layer, input_values, recurrent_values=nothing)
+Apply a next layer activation based on previous activations.
+
+Note: for RNN, the inputs may be a mix of input nodes and feedback
+      signals from recurrent nodes.
+"""
+function apply_layer(layer, input_values)
   values = if layer.weights !== nothing
-    if true
-      [layer.activation.(dot(input_values, w)) for w ∈ eachcol(layer.weights)]
-    else
-      weighted_inputs = [dot(input_values, w) for w ∈ eachcol(layer.weights)]
-      weighted_recurrents = [dot(recurrent_values, w) for w ∈ eachcol(layer.recurrent_weights)]
-
-      layer.activation.(weighted_inputs .+ weighted_recurrents)
-    end
+    # display("weights=$(layer.weights), inputs=$(input_values)")
+    [layer.activation.(dot(input_values, w)) for w ∈ eachcol(layer.weights)]
   else
     layer.activation.(input_values)
   end
@@ -186,6 +227,29 @@ function apply_layer(layer, input_values, recurrent_values=nothing)
   end
 end
 
+"""
+  build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_fn="squared-difference", ϵ=0.01, network_config=nothing, recurrent=false)
+
+Build a neural network with given parameters.
+
+The function returns a triple `(nn, train, infer)`. `nn` is the
+neural network in its initial state. `train` is a function to
+train the neural net (e.g. `train(nn)`) and `infer` is a function
+to run inference on the net (e.g. `infer(nn, ["red"])`). Generally,
+you will use a pattern like so:
+
+```julia-repl
+(nn, train, infer) = build_nn()
+nn = train(nn)
+infer(nn, ["red"])
+```
+
+This pattern allows you to train the network many times to get updated
+weights, and then to infer on the final network.
+
+Note: we don't currently have any framework to store the weights
+      of a network, but we'll expect to build that soon.s
+"""
 function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_fn="squared-difference", ϵ=0.01, network_config=nothing, recurrent=false)
   # Embedding maps the user-defined input (grammar) to a vector space.
   # This function is a helper so we can broadcast over inputs,
@@ -193,10 +257,8 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
   apply_embedding(k) = embedding[k]
 
   # We want to determine the size of the input embedding. The current
-  # strategy here is to grab the first one from the training set,
-  # since each one should be the same. There's probably a better
-  # way to do this.
-  input_sz = length(apply_embedding(rand(training)[begin]))
+  # strategy here is to grab the a random embedding's value.
+  input_sz = length(iterate(embedding)[begin][end])
 
   # We initialize the neural network. The neural network is an array
   # of layers in the network. This includes loading weights for each
@@ -294,15 +356,18 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
   # Calculate a step in the forward pass, passing around a
   # context value, which is the activation on recurrent layers.
   function calculate_next_layer_with_context((values, context), layer)
-    values = if layer.recurrent
-      recurrent_values = fetch!(context, layer.recurrent, "missing recurrent layer $(layer.recurrent) in context")
-      next_values = apply_layer(layer, values, recurrent_values)
+    next_values = if layer.recurrent !== nothing
+      # display("context=$context")
+      recurrent_values = fetch!(context, layer.recurrent, "missing recurrent layer `$(layer.recurrent)` in context")
+      # display(values)
+      # display(recurrent_values)
+      values = apply_layer(layer, [values; recurrent_values])
     else
       apply_layer(layer, values)
     end
 
     if layer.feedback
-      # TODO: Is it good to do this by tag?
+      # TODO: Context is currently being indexed by tags, could we make that better/faster?
       (next_values, merge(context, Dict(layer.tag => next_values)))
     else
       (next_values, context)
@@ -317,14 +382,20 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
     Folds.reduce(calculate_next_layer_with_context, nn; init=(input, context))
   end
 
-  # The `train` function can be used to run a single training case
-  # or a batch of training cases. This function will return an
-  # updated neural net having undergone a single step of
-  # stochastic gradient decent. Note: for a batch of training
-  # cases, we'll still only take one step in the average direction
-  # from the batch of cases. If no case or batch is provided,
-  # this function will grab a random batch of two training cases
-  # from the `training` dictionary.
+  """
+        train(nn; case=nothing, batch=nothing, debug=false)
+
+    Train a network with a single or batch set of cases
+
+    The `train` function can be used to run a single training case
+    or a batch of training cases. This function will return an
+    updated neural net having undergone a single step of
+    stochastic gradient decent. Note: for a batch of training
+    cases, we'll still only take one step in the average direction
+    from the batch of cases. If no case or batch is provided,
+    this function will grab a random batch of two training cases
+    from the `training` dictionary.
+  """
   function train(nn; case=nothing, batch=nothing, debug=false)
     inputs = if batch == nothing
       if case == nothing
@@ -336,6 +407,16 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       map(case -> (case, get_case(case)), batch)
     end
 
+    """
+        derive_gradients((input, target))
+
+    Build the gradients on the training case
+
+    Given a network, an input value, and a target (expected)
+    value, this function produces the gradients for each
+    layer of the neural network. These gradients can be used
+    in stochastic gradient descent to train the network.
+    """
     function derive_gradients((input, target))
       embedded_input = apply_embedding(input)
 
@@ -351,15 +432,62 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       actual = output_with_hidden[end]
       error = cost(target, actual)
 
+      """
+          backpropagate((∂E∂yjs, ∂E∂zjs, ∂E∂wijs, prev_layer), ((j, layer), yj, yi))
+
+      Backpropagate one layer of the net in determining gradients
+
+      This reduction works backwards through the outputs of the
+      neural net. Each step computes the gradients for that
+      layer, which then propagate backwards.
+
+      For context: `k` refers to the deepest layer, `j` refers to
+      the current layer, and `i` refers to the next (less deep)
+      layer (which may be the input layer).
+
+      ## Intermediate Values
+
+      We compute several important values in this function. You can
+      see most here: https://youtu.be/LOc_y67AzCA?si=daVtsgy9J5V4NGtP&t=634
+
+      ### ∂E∂yj
+
+      First, we calculate `∂E∂yj`, which is the derivative of the
+      error function with respect to the output of the current (`j`)
+      layer's activation (`yj`) values.
+
+      For the output layer, this is simply the derivative of the
+      error function applied to the actual (output) values.
+
+      For other layers of the net, this is `∑(w_jk)∂E∂zk` for
+      all outgoing connections from `j` to the `k` layer.
+
+      This can be easily calculated, thus, using a dot product.
+
+      ### ∂E∂zj
+
+      Next, we calculate `∂E∂zj`, which is the derivative of the
+      error function based on the inputs into layer `j`. This is
+      the derivative of the activation function times `∂E∂yj`, based
+      on the chain rule.
+
+      We use `activation_derivative`, which we stored in the layer
+      configuration in `initialize_network` for the derivative
+      function.
+
+      ### ∂E∂wij
+
+      Finally, we calculate `∂E∂wij`, which is the derivative of
+      the error function based on the weights into layer `j`. This
+      is the most important value of the backpropagation function,
+      as these gradients will be used to change the weights during
+      our stochastic gradient descent step. This value is simply
+      `(y_i)(∂E∂zj)`. That is, the output of the neuron from layer
+      `i` times the `∂E∂zj` of the neuron its connected to. We can
+      use a big outer multiplication to calculate these all in one
+      step.
+      """
       function backpropagate((∂E∂yjs, ∂E∂zjs, ∂E∂wijs, prev_layer), ((j, layer), yj, yi))
-        # This reduction works backwards through the outputs of the
-        # neural net. Each step computes the weight changes for that
-        # layer and then propagates backwards. The result is several
-        # named vectors (∂E∂yj=...,∂E∂zj=...,∆weightj=...,weightj=...)
-
-        # Note: i refers to current layer, y to next layer up
-        # Note: Due to backpropagation, y was calculated before i
-
         if debug
           display("j=$j")
           display("layer=$layer")
@@ -378,7 +506,7 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
           # Other layer's are defined by backprop from the previous layer
           ∂E∂zk = ∂E∂zjs[end]
 
-          # Calculate ∂E∂yj, which will be `∂E∂yk` for the next iteration
+          # Calculate `∂E∂yj`, which will be `∂E∂yk` for the next iteration
           if prev_layer.config.type == "softmax"
             # I need to mull this, but I believe since there are no weights
             # we just pass this through directly?
@@ -395,7 +523,6 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
 
         # display("∂E∂yj=$∂E∂yj")
 
-        # For each of these 4
         ∂E∂zj = layer.activation_derivative.(yj) .* ∂E∂yj
 
         # display("∂E∂zj=$∂E∂zj")
@@ -449,12 +576,18 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
     [map(reweight, zip(nn, gradient_layers))...]
   end
 
-  # When we're inferencing, it's nice to output our error,
-  # though we only can calculate it if we have a target,
-  # (this is, the input was part of our training set).
-  #
-  # This function returns the error if that's the case, and
-  # otherwise `nothing`.
+  """
+      try_check_error((input, actual))
+
+  Try to check the error, but only if the input is in the training set.
+
+  When we're inferencing, it's nice to output our error,
+  though we only can calculate it if we have a target,
+  (this is, the input was part of our training set).
+  
+  This function returns the error if that's the case, and
+  otherwise `nothing`.
+  """
   function try_check_error((input, actual))
     if haskey(training, input)
       cost(get(training, input, nothing), actual)
@@ -463,14 +596,20 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
     end
   end
 
-  # The inference function calculates the output of the net
-  # for a given input case. For a feed-forward neural network
-  # this will run the inference for each item in the input
-  # vector. For a recurrent neural network, this function will
-  # take one step for each value in the input vector.
-  #
-  # Note: this function currently display the output, it doesn't
-  #       return the value. It does return a potential error size.
+  """
+      infer(nn, input)
+
+  Infer a value from a given neural net.
+
+  The inference function calculates the output of the net
+  for a given input case. For a feed-forward neural network
+  this will run the inference for each item in the input
+  vector. For a recurrent neural network, this function will
+  take one step for each value in the input vector.
+
+  Note: this function currently display the output, it doesn't
+        return the value. It does return a potential error size.
+  """
   function infer(nn, input)
     embedded_input = apply_embedding.(input) # TODO: Accept single input?
 
@@ -493,12 +632,15 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       # The `ys` is a collection of outputs of the net
       local ys = []
 
-      for i ∈ embedded_inputs
+      for i ∈ embedded_input
         # Run a single input, storing the output from this
         # run, as well as a context to use for the next input.
         (y, context) = calculate_value_with_context(nn, i, context)
 
-        append!(ys, y)
+        display("y=$y")
+        display("ys=$ys")
+
+        append!(ys, [y])
       end
 
       ys
@@ -508,9 +650,15 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       [calculate_value(nn, i) for i ∈ embedded_input]
     end
 
+    display("output=$output")
     show_fn(output)
 
-    mean(filter(x -> x !== nothing, map(try_check_error, zip(input, output))))
+    if recurrent
+      # TODO: Consider calculating error for recurrent
+      0
+    else
+      mean(filter(x -> x !== nothing, map(try_check_error, zip(input, output))))
+    end
   end
 
   (nn, train, infer)
