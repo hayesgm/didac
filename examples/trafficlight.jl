@@ -61,11 +61,12 @@ display(nn)
 
 err = infer(nn, ["continue", "continue", "continue"])
 # display("err=$err")
+nn = train(nn, case=training[begin][begin])
 
-for i ∈ 1:1000
-  for j ∈ 1:1
-    global nn = train(nn, case=training[begin][begin])
-  end
+# for i ∈ 1:1000
+#   for j ∈ 1:1
+#     global nn = train(nn, case=training[begin][begin])
+#   end
 
-  infer(nn, ["continue", "continue", "continue", "continue"])
-end
+#   infer(nn, ["continue", "continue", "continue", "continue"])
+# end

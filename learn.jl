@@ -477,6 +477,52 @@ function backpropagate((debug, cost_derivative, target, ∂E∂yjs, ∂E∂zjs, 
 end
 
 """
+    derive_gradients(embedded_input, target, context, cost, cost_derivative, debug=false)
+
+Build the gradients on the training case
+
+Given a network, an input value, and a target (expected)
+value, this function produces the gradients for each
+layer of the neural network. These gradients can be used
+in stochastic gradient descent to train the network.
+
+We also return the next context, which is used for the next
+run of a RNN.
+"""
+function derive_gradients(embedded_input, target, context, cost, cost_derivative, debug=false)
+  # display("input=$input")
+  # display("target=$target")
+  #display("embedded_input=$embedded_input")
+
+  #display("prev_context=$context")
+
+  (output_with_hidden, next_context) = calculate_value_with_hidden(nn, embedded_input, context)
+
+  #display("next_context=$next_context")
+
+  if debug
+    show_output(output_with_hidden)
+  end
+
+  # Now let's train, we have an output and a target. So let's use back propagation to figure out how our weights should be updated.
+
+  # First, let's calculate our overall error
+  actual = output_with_hidden[end]
+  error = cost(target, actual)
+
+  layer_values = zip(enumerate(nn), output_with_hidden[2:end], output_with_hidden[1:end-1])
+
+  # display("layer_values=$([layer_values...])")
+
+  (∂E∂yis_rev, ∂E∂zis_rev, ∂E∂wijs_rev) = reduce(backpropagate, Iterators.reverse(layer_values); init=(debug, cost_derivative, target, [], [], [], nothing))
+  ∂E∂yis = Iterators.reverse(∂E∂yis_rev)
+  ∂E∂zis = Iterators.reverse(∂E∂zis_rev)
+  ∂E∂wijs = Iterators.reverse(∂E∂wijs_rev)
+
+  ([∂E∂wijs...], next_context)
+end
+
+"""
   build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_fn="squared-difference", ϵ=0.01, network_config=nothing, recurrent=false)
 
 Build a neural network with given parameters.
@@ -558,7 +604,7 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       # display("training=$training")
       # display("case=$case")
       (steps, targets) = get_case(case)
-      zip(steps, targets)
+      [zip(steps, targets)...]
     else
       if batch == nothing
         if case == nothing
@@ -571,65 +617,24 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       end
     end
 
-    #display("inputs=$inputs")
-
-    """
-        derive_gradients((input, target, context))
-
-    Build the gradients on the training case
-
-    Given a network, an input value, and a target (expected)
-    value, this function produces the gradients for each
-    layer of the neural network. These gradients can be used
-    in stochastic gradient descent to train the network.
-
-    We also return the next context, which is used for the next
-    run of a RNN.
-    """
-    function derive_gradients((input, target), context)
-      # display("input=$input")
-      # display("target=$target")
-      embedded_input = apply_embedding(input)
-      #display("embedded_input=$embedded_input")
-
-      #display("prev_context=$context")
-
-      (output_with_hidden, next_context) = calculate_value_with_hidden(nn, embedded_input, context)
-
-      #display("next_context=$next_context")
-
-      if debug
-        show_output(output_with_hidden)
-      end
-
-      # Now let's train, we have an output and a target. So let's use back propagation to figure out how our weights should be updated.
-
-      # First, let's calculate our overall error
-      actual = output_with_hidden[end]
-      error = cost(target, actual)
-
-      layer_values = zip(enumerate(nn), output_with_hidden[2:end], output_with_hidden[1:end-1])
-
-      # display("layer_values=$([layer_values...])")
-
-      (∂E∂yis_rev, ∂E∂zis_rev, ∂E∂wijs_rev) = reduce(backpropagate, Iterators.reverse(layer_values); init=(debug, cost_derivative, target, [], [], [], nothing))
-      ∂E∂yis = Iterators.reverse(∂E∂yis_rev)
-      ∂E∂zis = Iterators.reverse(∂E∂zis_rev)
-      ∂E∂wijs = Iterators.reverse(∂E∂wijs_rev)
-
-      ([∂E∂wijs...], next_context)
-    end
+    # display("inputs=$inputs $(length(inputs))")
 
     gradients = if recurrent
-      (gradients, _) = reduce(inputs, init=([], initial_context(nn))) do (acc, context), input
-        (gradient, next_context) = derive_gradients(input, context)
+      (gradients, _) = reduce(inputs, init=([], initial_context(nn))) do (acc, context), (input, target)
+        (gradient, next_context) = derive_gradients(apply_embedding(input), target, context, cost, cost_derivative, debug)
+        display("acc=$acc,gradient=$gradient")
         ([acc; [gradient]], next_context)
       end
-      
+
       gradients
     else
-      map(i -> derive_gradients(i, Dict())[begin], inputs)
+      map(inputs) do (input, target)
+        (gradient, _) = derive_gradients(apply_embedding(input), target, Dict(), cost, cost_derivative, debug)
+        gradient
+      end
     end
+
+    # display("gradients=$gradients")
 
     gradient_layers = [[gradient[i] for gradient in gradients] for i in 1:length(gradients[1])]
 
@@ -663,7 +668,7 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
   When we're inferencing, it's nice to output our error,
   though we only can calculate it if we have a target,
   (this is, the input was part of our training set).
-  
+
   This function returns the error if that's the case, and
   otherwise `nothing`.
   """
