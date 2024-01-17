@@ -6,10 +6,6 @@ using PrettyTables
 using Folds
 using Statistics
 
-### TODO Items
-# 1. Add Dropout
-# 2. Add RNN
-
 ### Activation Functions
 #
 # Activation functions are used to map the weighted
@@ -73,6 +69,7 @@ cost_fns = Dict(
   "cross-entropy" => (cross_entropy, cross_entropy_derivative),
 )
 
+# Helper function to get a field from a named tuple or else raise
 function fetch!(dict, key, err="key not found")
   if haskey(dict, key)
     dict[key]
@@ -81,6 +78,7 @@ function fetch!(dict, key, err="key not found")
   end
 end
 
+# Helper function to get a field from a named tuple or else return default
 function get_opt(opts, key, default)
   if opts !== nothing && key in fieldnames(typeof(opts))
     opts[key]
@@ -89,6 +87,7 @@ function get_opt(opts, key, default)
   end
 end
 
+# Helper function to check if named tuple contains given field
 has_opt(opts, key) = opts !== nothing && key in fieldnames(typeof(opts))
 
 """
@@ -287,7 +286,7 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
 
   # Helper function to pull a specific training case from our
   # training dictionary.
-  get_case(case) = fetch!(training, case, "unknown training case: $case")
+  get_case(case) = rand(filter(((c,_)) -> c == case, training))
 
   ### Feedforward Calculations
   #
@@ -307,54 +306,84 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
   # they are allowed to be passed to earlier layers in the
   # net.
   #
-  # Note: These splits may end up being a premature
+  # Note: These splits may end up being a pre-mature
   #       optimization and maybe it would make more sense to
   #       simply always track the output of each layer, even
   #       during inference.
 
-  # This function will activate a single next layer
-  # in the foward pass of the neural net based on
-  # the activation of the previous layer.
-  #
-  # Note: for a recurrent neural network, we will
-  #       store the context (activation) of any
-  #       feedback layers in the net for the next
-  #       input's pass on the net.
+  """
+      calculate_next_layer(values, layer)
+
+  Inner function to calculate forward one pass of a feed-forward network
+
+  This function will activate a single next layer
+  in the foward pass of the neural net based on
+  the activation of the previous layer.
+  
+  Note: for a recurrent neural network, we will
+        store the context (activation) of any
+        feedback layers in the net for the next
+        input's pass on the net.
+  """
   function calculate_next_layer(values, layer)
     apply_layer(layer, values)
   end
 
-  # This function walks the neural net, activating
-  # one layer at a time until it reaches the output.
-  #
-  # Note: for a recurrent neural network, this function
-  #       will store all contexts (that is, the output
-  #       of a hidden layer that is the input to another
-  #       layer) in an accumulator for the next step
-  #       in the input array.
+  """
+      calculate_value(nn, input)
+
+  Calculate output value of a feed-forward network
+
+  This function walks the neural net, activating
+  one layer at a time until it reaches the output.
+  
+  Note: for a recurrent neural network, this function
+        will store all contexts (that is, the output
+        of a hidden layer that is the input to another
+        layer) in an accumulator for the next step
+        in the input array.
+  """
   function calculate_value(nn, input)
     Folds.reduce(calculate_next_layer, nn; init=input)
   end
 
-  # Inner loop of reduction. Simple forward pass on the
-  # neural net during the inference part of the training.
-  #
-  # Note: for training, we collect the activation of each
-  #       layer in the neural net, as they are necessary
-  #       for determining the gradient for learning.
+  """
+      calculate_next_layer_with_hidden(values, layer)
+
+  Inner function to calculate layer of a network, tracking all intermediate activations.
+
+  Inner loop of reduction. Simple forward pass on the
+  neural net during the inference part of the training.
+  
+  Note: for training, we collect the activation of each
+        layer in the neural net, as they are necessary
+        for determining the gradient for learning.
+  """
   function calculate_next_layer_with_hidden(values, layer)
     [values; [apply_layer(layer, values[end])]]
   end
 
-  # Calculates the forward pass on the neural net during
-  # the inference part of training. Returns an array with
-  # the activations in each layer of the net.
+  """
+      calculate_value_with_hidden(nn, input)
+
+  Calculate all network activations for given input
+
+  Calculates the forward pass on the neural net during
+  the inference part of training. Returns an array with
+  the activations in each layer of the net.
+  """
   function calculate_value_with_hidden(nn, input)
     Folds.reduce(calculate_next_layer_with_hidden, nn; init=[input])
   end
 
-  # Calculate a step in the forward pass, passing around a
-  # context value, which is the activation on recurrent layers.
+  """
+      calculate_next_layer_with_context((values, context), layer)
+
+  Calculate single step of a forward pass in a recurrent network
+
+  Calculates a step in the forward pass, passing around a
+  context value, which is the activation on recurrent layers.
+  """
   function calculate_next_layer_with_context((values, context), layer)
     next_values = if layer.recurrent !== nothing
       # display("context=$context")
@@ -374,27 +403,33 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
     end
   end
 
-  # Calculates the forward pass on the neural net given
-  # a context, which is the activation on recurrent layers.
-  # We return both the output and a new context that can
-  # be used in the next iteration.
+  """
+      calculate_value_with_context(nn, input, context)
+
+  Calculate output value and next context from a recurrent neural network, given the input.
+
+  Calculates the forward pass on the neural net given
+  a context, which is the activation on recurrent layers.
+  We return both the output and a new context that can
+  be used in the next iteration.
+  """
   function calculate_value_with_context(nn, input, context)
     Folds.reduce(calculate_next_layer_with_context, nn; init=(input, context))
   end
 
   """
-        train(nn; case=nothing, batch=nothing, debug=false)
+      train(nn; case=nothing, batch=nothing, debug=false)
 
-    Train a network with a single or batch set of cases
+  Train a network with a single or batch set of cases
 
-    The `train` function can be used to run a single training case
-    or a batch of training cases. This function will return an
-    updated neural net having undergone a single step of
-    stochastic gradient decent. Note: for a batch of training
-    cases, we'll still only take one step in the average direction
-    from the batch of cases. If no case or batch is provided,
-    this function will grab a random batch of two training cases
-    from the `training` dictionary.
+  The `train` function can be used to run a single training case
+  or a batch of training cases. This function will return an
+  updated neural net having undergone a single step of
+  stochastic gradient decent. Note: for a batch of training
+  cases, we'll still only take one step in the average direction
+  from the batch of cases. If no case or batch is provided,
+  this function will grab a random batch of two training cases
+  from the `training` dictionary.
   """
   function train(nn; case=nothing, batch=nothing, debug=false)
     inputs = if batch == nothing
