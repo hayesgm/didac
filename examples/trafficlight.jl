@@ -58,14 +58,14 @@ end
 )
 
 display(nn)
-# for i ∈ 1:10
-#   for j ∈ 1:20000
-#     global nn = train(nn)
-#   end
 
 err = infer(nn, ["continue", "continue", "continue"])
-display("err=$err")
-nn = train(nn, case=training[begin])
-# end
+# display("err=$err")
 
-# show(nn)
+for i ∈ 1:1000
+  for j ∈ 1:1
+    global nn = train(nn, case=training[begin][begin])
+  end
+
+  infer(nn, ["continue", "continue", "continue", "continue"])
+end

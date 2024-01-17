@@ -198,10 +198,24 @@ function initialize_network(input_sz, layer_configs; network_config=nothing)
   layer_sizes = Dict([(tag, layer_config.nodes) for (tag, layer_config) in tagged_layer_configs])
 
   # Build each layer in a big reduction
-  (layers, _) = Folds.reduce(initialize_layer, tagged_layer_configs, init=([], 1, input_sz, layer_sizes, network_config))
+  (layers, _) = reduce(initialize_layer, tagged_layer_configs, init=([], 1, input_sz, layer_sizes, network_config))
 
   layers
 end
+
+"""
+    initial_context(nn)
+
+Build the initial context for a (potentially) recursive neural net
+
+Note: this is based on the `initial_activation` of the layers in the
+      net, which is build in `initialize_network`.
+"""
+initial_context(nn) = Dict([
+  (layer.tag, layer.initial_activation)
+  for layer in nn
+  if layer.initial_activation !== nothing
+])
 
 """
   apply_layer(layer, input_values)
@@ -213,7 +227,7 @@ Note: for RNN, the inputs may be a mix of input nodes and feedback
 """
 function apply_layer(layer, input_values)
   values = if layer.weights !== nothing
-    # display("weights=$(layer.weights), inputs=$(input_values)")
+    #display("weights=$(layer.weights), inputs=$(input_values)")
     [layer.activation.(dot(input_values, w)) for w ∈ eachcol(layer.weights)]
   else
     layer.activation.(input_values)
@@ -224,6 +238,242 @@ function apply_layer(layer, input_values)
   else
     values
   end
+end
+
+### Feedforward Calculations
+#
+# The following functions are used to calculate
+# the output of the network in a feed-forward approach.
+# We separate these into multiple functions, since
+# calculating the output of a recurrent net is slightly
+# different than calculating the output of a simple
+# feed-forward network.
+#
+# As each layer depends on the activation of the previous
+# layer, we use a reduction to pass the calculation to
+# the next layer in the net. For inference, we track
+# the activation of each layer since we'll need it for
+# gradient descent. For recurrent nets, we only track
+# the value of layers which are marked recurrent, meaning
+# they are allowed to be passed to earlier layers in the
+# net.
+#
+# Note: These splits may end up being a pre-mature
+#       optimization and maybe it would make more sense to
+#       simply always track the output of each layer, even
+#       during inference.
+
+"""
+    calculate_next_layer(values, layer)
+
+Inner function to calculate forward one pass of a feed-forward network
+
+This function will activate a single next layer
+in the foward pass of the neural net based on
+the activation of the previous layer.
+
+Note: for a recurrent neural network, we will
+      store the context (activation) of any
+      feedback layers in the net for the next
+      input's pass on the net.
+"""
+function calculate_next_layer(values, layer)
+  apply_layer(layer, values)
+end
+
+"""
+    calculate_value(nn, input)
+
+Calculate output value of a feed-forward network
+
+This function walks the neural net, activating
+one layer at a time until it reaches the output.
+
+Note: for a recurrent neural network, this function
+      will store all contexts (that is, the output
+      of a hidden layer that is the input to another
+      layer) in an accumulator for the next step
+      in the input array.
+"""
+function calculate_value(nn, input)
+  reduce(calculate_next_layer, nn; init=input)
+end
+
+"""
+    calculate_next_layer_with_hidden(values, layer)
+
+Inner function to calculate layer of a network, tracking all intermediate activations.
+
+Inner loop of reduction. Simple forward pass on the
+neural net during the inference part of the training.
+
+Note: for training, we collect the activation of each
+      layer in the neural net, as they are necessary
+      for determining the gradient for learning.
+"""
+function calculate_next_layer_with_hidden((values, context), layer)
+  (next_values, next_context) = calculate_next_layer_with_context((values[end], context), layer)
+  ([values; [next_values]], next_context)
+end
+
+"""
+    calculate_value_with_hidden(nn, input, context)
+
+Calculate all network activations for given input
+
+Calculates the forward pass on the neural net during
+the inference part of training. Returns an array with
+the activations in each layer of the net.
+"""
+function calculate_value_with_hidden(nn, input, context)
+  reduce(calculate_next_layer_with_hidden, nn; init=([input], context))
+end
+
+"""
+    calculate_next_layer_with_context((values, context), layer)
+
+Calculate single step of a forward pass in a recurrent network
+
+Calculates a step in the forward pass, passing around a
+context value, which is the activation on recurrent layers.
+"""
+function calculate_next_layer_with_context((values, context), layer)
+  next_values = if layer.recurrent !== nothing
+    # display("context=$context")
+    recurrent_values = fetch!(context, layer.recurrent, "missing recurrent layer `$(layer.recurrent)` in context")
+    # display(values)
+    # display(recurrent_values)
+    values = apply_layer(layer, [values; recurrent_values])
+  else
+    apply_layer(layer, values)
+  end
+
+  if layer.feedback
+    # TODO: Context is currently being indexed by tags, could we make that better/faster?
+    (next_values, merge(context, Dict(layer.tag => next_values)))
+  else
+    (next_values, context)
+  end
+end
+
+"""
+    calculate_value_with_context(nn, input, context)
+
+Calculate output value and next context from a recurrent neural network, given the input.
+
+Calculates the forward pass on the neural net given
+a context, which is the activation on recurrent layers.
+We return both the output and a new context that can
+be used in the next iteration.
+"""
+function calculate_value_with_context(nn, input, context)
+  reduce(calculate_next_layer_with_context, nn; init=(input, context))
+end
+
+"""
+    backpropagate((debug, cost_derivative, target, ∂E∂yjs, ∂E∂zjs, ∂E∂wijs, prev_layer), ((j, layer), yj, yi))
+
+Backpropagate one layer of the net in determining gradients
+
+This reduction works backwards through the outputs of the
+neural net. Each step computes the gradients for that
+layer, which then propagate backwards.
+
+For context: `k` refers to the deepest layer, `j` refers to
+the current layer, and `i` refers to the next (less deep)
+layer (which may be the input layer).
+
+## Intermediate Values
+
+We compute several important values in this function. You can
+see most here: https://youtu.be/LOc_y67AzCA?si=daVtsgy9J5V4NGtP&t=634
+
+### ∂E∂yj
+
+First, we calculate `∂E∂yj`, which is the derivative of the
+error function with respect to the output of the current (`j`)
+layer's activation (`yj`) values.
+
+For the output layer, this is simply the derivative of the
+error function applied to the actual (output) values.
+
+For other layers of the net, this is `∑(w_jk)∂E∂zk` for
+all outgoing connections from `j` to the `k` layer.
+
+This can be easily calculated, thus, using a dot product.
+
+### ∂E∂zj
+
+Next, we calculate `∂E∂zj`, which is the derivative of the
+error function based on the inputs into layer `j`. This is
+the derivative of the activation function times `∂E∂yj`, based
+on the chain rule.
+
+We use `activation_derivative`, which we stored in the layer
+configuration in `initialize_network` for the derivative
+function.
+
+### ∂E∂wij
+
+Finally, we calculate `∂E∂wij`, which is the derivative of
+the error function based on the weights into layer `j`. This
+is the most important value of the backpropagation function,
+as these gradients will be used to change the weights during
+our stochastic gradient descent step. This value is simply
+`(y_i)(∂E∂zj)`. That is, the output of the neuron from layer
+`i` times the `∂E∂zj` of the neuron its connected to. We can
+use a big outer multiplication to calculate these all in one
+step.
+"""
+function backpropagate((debug, cost_derivative, target, ∂E∂yjs, ∂E∂zjs, ∂E∂wijs, prev_layer), ((j, layer), yj, yi))
+  if debug
+    display("j=$j")
+    display("layer=$layer")
+    display("prev_layer=$prev_layer")
+    display("∂E∂yjs=$∂E∂yjs")
+    display("∂E∂zjs=$∂E∂zjs")
+    display("∂E∂wijs=$∂E∂wijs")
+    display("yj=$yj")
+    display("yi=$yi")
+  end
+
+  ∂E∂yj = if prev_layer === nothing
+    # Output layer's gradient is defined by the cost function
+    cost_derivative(target, yj)
+  else
+    # Other layer's are defined by backprop from the previous layer
+    ∂E∂zk = ∂E∂zjs[end]
+
+    # Calculate `∂E∂yj`, which will be `∂E∂yk` for the next iteration
+    if prev_layer.config.type == "softmax"
+      # I need to mull this, but I believe since there are no weights
+      # we just pass this through directly?
+      # Note: this is really ∂zj∂yi
+      ∂E∂zk
+    else
+      # This is the "caching" part of the back propagating algorithm
+      # that uses previously calculated values
+      # There might be room to make this comprehension even
+      # a little faster.
+      [dot(neuron, ∂E∂zk) for neuron ∈ eachrow(prev_layer.weights)]
+    end
+  end
+
+  # display("∂E∂yj=$∂E∂yj")
+
+  ∂E∂zj = layer.activation_derivative.(yj) .* ∂E∂yj
+
+  # display("∂E∂zj=$∂E∂zj")
+
+  ∂E∂wij = if layer.config.type == "softmax"
+    nothing
+  else
+    yi * ∂E∂zj'
+  end
+
+  # display("size(∂E∂wij)=$(size(∂E∂wij))")
+
+  (debug, cost_derivative, target, [∂E∂yjs; [∂E∂yj]], [∂E∂zjs; [∂E∂zj]], [∂E∂wijs; [∂E∂wij]], layer)
 end
 
 """
@@ -286,136 +536,7 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
 
   # Helper function to pull a specific training case from our
   # training dictionary.
-  get_case(case) = rand(filter(((c,_)) -> c == case, training))
-
-  ### Feedforward Calculations
-  #
-  # The following functions are used to calculate
-  # the output of the network in a feed-forward approach.
-  # We separate these into multiple functions, since
-  # calculating the output of a recurrent net is slightly
-  # different than calculating the output of a simple
-  # feed-forward network.
-  #
-  # As each layer depends on the activation of the previous
-  # layer, we use a reduction to pass the calculation to
-  # the next layer in the net. For inference, we track
-  # the activation of each layer since we'll need it for
-  # gradient descent. For recurrent nets, we only track
-  # the value of layers which are marked recurrent, meaning
-  # they are allowed to be passed to earlier layers in the
-  # net.
-  #
-  # Note: These splits may end up being a pre-mature
-  #       optimization and maybe it would make more sense to
-  #       simply always track the output of each layer, even
-  #       during inference.
-
-  """
-      calculate_next_layer(values, layer)
-
-  Inner function to calculate forward one pass of a feed-forward network
-
-  This function will activate a single next layer
-  in the foward pass of the neural net based on
-  the activation of the previous layer.
-  
-  Note: for a recurrent neural network, we will
-        store the context (activation) of any
-        feedback layers in the net for the next
-        input's pass on the net.
-  """
-  function calculate_next_layer(values, layer)
-    apply_layer(layer, values)
-  end
-
-  """
-      calculate_value(nn, input)
-
-  Calculate output value of a feed-forward network
-
-  This function walks the neural net, activating
-  one layer at a time until it reaches the output.
-  
-  Note: for a recurrent neural network, this function
-        will store all contexts (that is, the output
-        of a hidden layer that is the input to another
-        layer) in an accumulator for the next step
-        in the input array.
-  """
-  function calculate_value(nn, input)
-    Folds.reduce(calculate_next_layer, nn; init=input)
-  end
-
-  """
-      calculate_next_layer_with_hidden(values, layer)
-
-  Inner function to calculate layer of a network, tracking all intermediate activations.
-
-  Inner loop of reduction. Simple forward pass on the
-  neural net during the inference part of the training.
-  
-  Note: for training, we collect the activation of each
-        layer in the neural net, as they are necessary
-        for determining the gradient for learning.
-  """
-  function calculate_next_layer_with_hidden(values, layer)
-    [values; [apply_layer(layer, values[end])]]
-  end
-
-  """
-      calculate_value_with_hidden(nn, input)
-
-  Calculate all network activations for given input
-
-  Calculates the forward pass on the neural net during
-  the inference part of training. Returns an array with
-  the activations in each layer of the net.
-  """
-  function calculate_value_with_hidden(nn, input)
-    Folds.reduce(calculate_next_layer_with_hidden, nn; init=[input])
-  end
-
-  """
-      calculate_next_layer_with_context((values, context), layer)
-
-  Calculate single step of a forward pass in a recurrent network
-
-  Calculates a step in the forward pass, passing around a
-  context value, which is the activation on recurrent layers.
-  """
-  function calculate_next_layer_with_context((values, context), layer)
-    next_values = if layer.recurrent !== nothing
-      # display("context=$context")
-      recurrent_values = fetch!(context, layer.recurrent, "missing recurrent layer `$(layer.recurrent)` in context")
-      # display(values)
-      # display(recurrent_values)
-      values = apply_layer(layer, [values; recurrent_values])
-    else
-      apply_layer(layer, values)
-    end
-
-    if layer.feedback
-      # TODO: Context is currently being indexed by tags, could we make that better/faster?
-      (next_values, merge(context, Dict(layer.tag => next_values)))
-    else
-      (next_values, context)
-    end
-  end
-
-  """
-      calculate_value_with_context(nn, input, context)
-
-  Calculate output value and next context from a recurrent neural network, given the input.
-
-  Calculates the forward pass on the neural net given
-  a context, which is the activation on recurrent layers.
-  We return both the output and a new context that can
-  be used in the next iteration.
-  """
-  function calculate_value_with_context(nn, input, context)
-    Folds.reduce(calculate_next_layer_with_context, nn; init=(input, context))
-  end
+  get_case(case) = rand(filter(c -> c.first == case, training))
 
   """
       train(nn; case=nothing, batch=nothing, debug=false)
@@ -432,18 +553,28 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
   from the `training` dictionary.
   """
   function train(nn; case=nothing, batch=nothing, debug=false)
-    inputs = if batch == nothing
-      if case == nothing
-        [rand(training), rand(training)]
-      else
-        [(case, get_case(case))]
-      end
+    inputs = if recurrent
+      # TODO: Handle this better?
+      # display("training=$training")
+      # display("case=$case")
+      (steps, targets) = get_case(case)
+      zip(steps, targets)
     else
-      map(case -> (case, get_case(case)), batch)
+      if batch == nothing
+        if case == nothing
+          [rand(training), rand(training)]
+        else
+          [(case, get_case(case))]
+        end
+      else
+        map(case -> (case, get_case(case)), batch)
+      end
     end
 
+    #display("inputs=$inputs")
+
     """
-        derive_gradients((input, target))
+        derive_gradients((input, target, context))
 
     Build the gradients on the training case
 
@@ -451,11 +582,21 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
     value, this function produces the gradients for each
     layer of the neural network. These gradients can be used
     in stochastic gradient descent to train the network.
-    """
-    function derive_gradients((input, target))
-      embedded_input = apply_embedding(input)
 
-      output_with_hidden = calculate_value_with_hidden(nn, embedded_input)
+    We also return the next context, which is used for the next
+    run of a RNN.
+    """
+    function derive_gradients((input, target), context)
+      # display("input=$input")
+      # display("target=$target")
+      embedded_input = apply_embedding(input)
+      #display("embedded_input=$embedded_input")
+
+      #display("prev_context=$context")
+
+      (output_with_hidden, next_context) = calculate_value_with_hidden(nn, embedded_input, context)
+
+      #display("next_context=$next_context")
 
       if debug
         show_output(output_with_hidden)
@@ -467,125 +608,28 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       actual = output_with_hidden[end]
       error = cost(target, actual)
 
-      """
-          backpropagate((∂E∂yjs, ∂E∂zjs, ∂E∂wijs, prev_layer), ((j, layer), yj, yi))
-
-      Backpropagate one layer of the net in determining gradients
-
-      This reduction works backwards through the outputs of the
-      neural net. Each step computes the gradients for that
-      layer, which then propagate backwards.
-
-      For context: `k` refers to the deepest layer, `j` refers to
-      the current layer, and `i` refers to the next (less deep)
-      layer (which may be the input layer).
-
-      ## Intermediate Values
-
-      We compute several important values in this function. You can
-      see most here: https://youtu.be/LOc_y67AzCA?si=daVtsgy9J5V4NGtP&t=634
-
-      ### ∂E∂yj
-
-      First, we calculate `∂E∂yj`, which is the derivative of the
-      error function with respect to the output of the current (`j`)
-      layer's activation (`yj`) values.
-
-      For the output layer, this is simply the derivative of the
-      error function applied to the actual (output) values.
-
-      For other layers of the net, this is `∑(w_jk)∂E∂zk` for
-      all outgoing connections from `j` to the `k` layer.
-
-      This can be easily calculated, thus, using a dot product.
-
-      ### ∂E∂zj
-
-      Next, we calculate `∂E∂zj`, which is the derivative of the
-      error function based on the inputs into layer `j`. This is
-      the derivative of the activation function times `∂E∂yj`, based
-      on the chain rule.
-
-      We use `activation_derivative`, which we stored in the layer
-      configuration in `initialize_network` for the derivative
-      function.
-
-      ### ∂E∂wij
-
-      Finally, we calculate `∂E∂wij`, which is the derivative of
-      the error function based on the weights into layer `j`. This
-      is the most important value of the backpropagation function,
-      as these gradients will be used to change the weights during
-      our stochastic gradient descent step. This value is simply
-      `(y_i)(∂E∂zj)`. That is, the output of the neuron from layer
-      `i` times the `∂E∂zj` of the neuron its connected to. We can
-      use a big outer multiplication to calculate these all in one
-      step.
-      """
-      function backpropagate((∂E∂yjs, ∂E∂zjs, ∂E∂wijs, prev_layer), ((j, layer), yj, yi))
-        if debug
-          display("j=$j")
-          display("layer=$layer")
-          display("prev_layer=$prev_layer")
-          display("∂E∂yjs=$∂E∂yjs")
-          display("∂E∂zjs=$∂E∂zjs")
-          display("∂E∂wijs=$∂E∂wijs")
-          display("yj=$yj")
-          display("yi=$yi")
-        end
-
-        ∂E∂yj = if prev_layer === nothing
-          # Output layer's gradient is defined by the cost function
-          cost_derivative(target, yj)
-        else
-          # Other layer's are defined by backprop from the previous layer
-          ∂E∂zk = ∂E∂zjs[end]
-
-          # Calculate `∂E∂yj`, which will be `∂E∂yk` for the next iteration
-          if prev_layer.config.type == "softmax"
-            # I need to mull this, but I believe since there are no weights
-            # we just pass this through directly?
-            # Note: this is really ∂zj∂yi
-            ∂E∂zk
-          else
-            # This is the "caching" part of the back propagating algorithm
-            # that uses previously calculated values
-            # There might be room to make this comprehension even
-            # a little faster.
-            [dot(neuron, ∂E∂zk) for neuron ∈ eachrow(prev_layer.weights)]
-          end
-        end
-
-        # display("∂E∂yj=$∂E∂yj")
-
-        ∂E∂zj = layer.activation_derivative.(yj) .* ∂E∂yj
-
-        # display("∂E∂zj=$∂E∂zj")
-
-        ∂E∂wij = if layer.config.type == "softmax"
-          nothing
-        else
-          yi * ∂E∂zj'
-        end
-
-        # display("size(∂E∂wij)=$(size(∂E∂wij))")
-
-        ([∂E∂yjs; [∂E∂yj]], [∂E∂zjs; [∂E∂zj]], [∂E∂wijs; [∂E∂wij]], layer)
-      end
-
       layer_values = zip(enumerate(nn), output_with_hidden[2:end], output_with_hidden[1:end-1])
 
       # display("layer_values=$([layer_values...])")
 
-      (∂E∂yis_rev, ∂E∂zis_rev, ∂E∂wijs_rev) = Folds.reduce(backpropagate, Iterators.reverse(layer_values); init=([], [], [], nothing))
+      (∂E∂yis_rev, ∂E∂zis_rev, ∂E∂wijs_rev) = reduce(backpropagate, Iterators.reverse(layer_values); init=(debug, cost_derivative, target, [], [], [], nothing))
       ∂E∂yis = Iterators.reverse(∂E∂yis_rev)
       ∂E∂zis = Iterators.reverse(∂E∂zis_rev)
       ∂E∂wijs = Iterators.reverse(∂E∂wijs_rev)
 
-      [∂E∂wijs...]
+      ([∂E∂wijs...], next_context)
     end
 
-    gradients = map(derive_gradients, inputs)
+    gradients = if recurrent
+      (gradients, _) = reduce(inputs, init=([], initial_context(nn))) do (acc, context), input
+        (gradient, next_context) = derive_gradients(input, context)
+        ([acc; [gradient]], next_context)
+      end
+      
+      gradients
+    else
+      map(i -> derive_gradients(i, Dict())[begin], inputs)
+    end
 
     gradient_layers = [[gradient[i] for gradient in gradients] for i in 1:length(gradients[1])]
 
@@ -658,22 +702,21 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       #
       # This `initial_activation` field is currently set in the
       # `initialize_layer` function to a random activation.
-      local context = Dict([
-        (layer.tag, layer.initial_activation)
-        for layer in nn
-        if layer.initial_activation !== nothing
-      ])
+      local context = initial_context(nn)
 
       # The `ys` is a collection of outputs of the net
       local ys = []
+
+      # display("embedded_input=$embedded_input")
 
       for i ∈ embedded_input
         # Run a single input, storing the output from this
         # run, as well as a context to use for the next input.
         (y, context) = calculate_value_with_context(nn, i, context)
 
-        display("y=$y")
-        display("ys=$ys")
+        # display("i=$i")
+        # display("y=$y")
+        # display("ys=$ys")
 
         append!(ys, [y])
       end
@@ -685,7 +728,7 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       [calculate_value(nn, i) for i ∈ embedded_input]
     end
 
-    display("output=$output")
+    # display("output=$output")
     show_fn(output)
 
     if recurrent
