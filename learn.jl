@@ -90,6 +90,16 @@ end
 # Helper function to check if named tuple contains given field
 has_opt(opts, key) = opts !== nothing && key in fieldnames(typeof(opts))
 
+# This is a quick and dirty function to show the activations of
+# each neuron in the net for debugging. This should probably be
+# improved.
+function show_output(output)
+  max_length = maximum(length.(output))
+  padded_vecs = [vcat(vec, fill(NaN, max_length - length(vec))) for vec in reverse(output)]
+  mat = hcat(padded_vecs...)'
+  pretty_table(mat, header=repeat([""], max_length))
+end
+
 """
     initialize_layer((layers, layer_num, prev_sz, network_config), layer_config)
 
@@ -498,7 +508,7 @@ function derive_gradients(embedded_input, target, context, cost, cost_derivative
 
   (output_with_hidden, next_context) = calculate_value_with_hidden(nn, embedded_input, context)
 
-  #display("next_context=$next_context")
+  # display("output_with_hidden=$output_with_hidden")
 
   if debug
     show_output(output_with_hidden)
@@ -513,8 +523,7 @@ function derive_gradients(embedded_input, target, context, cost, cost_derivative
   layer_values = zip(enumerate(nn), output_with_hidden[2:end], output_with_hidden[1:end-1])
 
   # display("layer_values=$([layer_values...])")
-
-  (∂E∂yis_rev, ∂E∂zis_rev, ∂E∂wijs_rev) = reduce(backpropagate, Iterators.reverse(layer_values); init=(debug, cost_derivative, target, [], [], [], nothing))
+  (_, _, _, ∂E∂yis_rev, ∂E∂zis_rev, ∂E∂wijs_rev) = reduce(backpropagate, Iterators.reverse(layer_values); init=(debug, cost_derivative, target, [], [], [], nothing))
   ∂E∂yis = Iterators.reverse(∂E∂yis_rev)
   ∂E∂zis = Iterators.reverse(∂E∂zis_rev)
   ∂E∂wijs = Iterators.reverse(∂E∂wijs_rev)
@@ -570,16 +579,6 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
   # it back to the grammar. This isn't currently used.
   inverse_embedding = Dict([(v, k) for (k, v) ∈ pairs(embedding)])
 
-  # This is a quick and dirty function to show the activations of
-  # each neuron in the net for debugging. This should probably be
-  # improved.
-  function show_output(output)
-    max_length = maximum(length.(output))
-    padded_vecs = [vcat(vec, fill(NaN, max_length - length(vec))) for vec in reverse(output)]
-    mat = hcat(padded_vecs...)'
-    pretty_table(mat, header=repeat([""], max_length))
-  end
-
   # Helper function to pull a specific training case from our
   # training dictionary.
   get_case(case) = rand(filter(c -> c.first == case, training))
@@ -622,7 +621,7 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
     gradients = if recurrent
       (gradients, _) = reduce(inputs, init=([], initial_context(nn))) do (acc, context), (input, target)
         (gradient, next_context) = derive_gradients(apply_embedding(input), target, context, cost, cost_derivative, debug)
-        display("acc=$acc,gradient=$gradient")
+        #display("acc=$acc,gradient=$gradient")
         ([acc; [gradient]], next_context)
       end
 
@@ -630,6 +629,7 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
     else
       map(inputs) do (input, target)
         (gradient, _) = derive_gradients(apply_embedding(input), target, Dict(), cost, cost_derivative, debug)
+        # display("gradient=$gradient")
         gradient
       end
     end
