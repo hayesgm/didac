@@ -601,6 +601,7 @@ function derive_gradients(nn, embedded_input, target, context, cost, cost_deriva
 
   # First, let's calculate our overall error
   actual = output_with_hidden[end]
+  # display("target=$target, actual=$actual")
   error = cost(target, actual)
 
   # TODO: I can probably just track the output here a bit differently
@@ -760,10 +761,10 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
         if case == nothing
           [rand(training), rand(training)]
         else
-          [(case, get_case(case))]
+          [get_case(case)]
         end
       else
-        map(case -> (case, get_case(case)), batch)
+        map(get_case, batch)
       end
     end
 
@@ -800,7 +801,7 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       gradients
     else
       map(inputs) do (input, target)
-        (gradient, _) = derive_gradients(nn, apply_embedding(input), target, Dict(), cost, cost_derivative, debug)
+        (gradient, _) = derive_gradients(nn, apply_embedding(input), target, Dict(), cost, cost_derivative, [], false, debug)
         # display("gradient=$gradient")
         gradient
       end

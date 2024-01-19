@@ -23,7 +23,7 @@ The majority of the code is in [learn.jl](/learn.jl), the core learning module. 
 
 There are several items which I would hope to add:
 
-- [ ] Support for RNN to model sequences
+- [x] Support for RNN to model sequences
 - [ ] Support for Dropout to improve generalization
 - [ ] Support for momentum
 - [ ] Loading and saving of models and parameters

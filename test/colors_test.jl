@@ -17,7 +17,7 @@ embedding = Dict(
 # Available given our grammer, but it doesn't mean we can't ain't learn.
 # Also, since our grammar is so limited, we'll probably end up including
 # all of our training cases in our results. But that's okay, this is all
-# a toy at this phase anyway.jul
+# a toy at this phase anyway.
 training = Dict(
   "red" => [0.9, 0.2, 0.2],
   "green" => [0.2, 0.9, 0.2],
