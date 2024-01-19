@@ -1,4 +1,4 @@
-include("../learn.jl")
+include("../didac.jl")
 
 # This could probably be made using an identity matrix and an index paramter
 embedding = Dict(

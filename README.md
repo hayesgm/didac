@@ -17,7 +17,7 @@ Currently, the best examples as in the `examples/` folder. E.g. to run the traff
 
 All code is based on the [former Coursera lecture series by Geoffrey Hinton](https://www.youtube.com/playlist?list=PLoRl3Ht4JOcdU872GhiYWf6jwrk_SNhz9). I will try to add comments to the code to link to certain equations from the series that match certain lines of code.
 
-The majority of the code is in [learn.jl](/learn.jl), the core learning module. The code is heavily documented and should be helpful in understanding exactly what is occurring and why. The easiest way to get an understand of how it works is to run it against an example (e.g. `julia examples/colors.jl`) and observe how the net learns.
+The majority of the code is in [didac.jl](/didac.jl), the core learning module. The code is heavily documented and should be helpful in understanding exactly what is occurring and why. The easiest way to get an understand of how it works is to run it against an example (e.g. `julia examples/colors.jl`) and observe how the net learns.
 
 ## Areas to Contribute
 
