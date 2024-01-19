@@ -90,6 +90,15 @@ end
 # Helper function to check if named tuple contains given field
 has_opt(opts, key) = opts !== nothing && key in fieldnames(typeof(opts))
 
+# Helper function to split a vector at a given index
+split(vec, idx) = (vec[begin:idx-1], vec[idx:end])
+
+# Helper function to drop first n elements from an array
+drop(vec, n) = vec[begin+n:end]
+
+# Helper function to drop last n elements from an array
+drop_right(vec, n) = vec[end-length(vec)+1:end-n]
+
 # This is a quick and dirty function to show the activations of
 # each neuron in the net for debugging. This should probably be
 # improved.
@@ -176,7 +185,8 @@ function initialize_layer((layers, layer_num, prev_sz, layer_sizes, network_conf
     activation=activation,
     activation_derivative=activation_derivative,
     scaled=scaled,
-    apply_weight_constraints=apply_weight_constraints
+    apply_weight_constraints=apply_weight_constraints,
+    skip=0
   )
 
   ([layers; [layer]], layer_num + 1, layer_sz, layer_sizes, network_config)
@@ -193,6 +203,8 @@ is simply a collection of these layers. If weights aren't specified,
 they will generated randomly. We also suss out certain items like the
 activation function, to make it easier to call when we're inferring
 a value from the net.
+
+Note: only a single recurrent layer is allowed at this time.
 
 # Examples
 ```julia-repl
@@ -226,6 +238,35 @@ initial_context(nn) = Dict([
   for layer in nn
   if layer.initial_activation !== nothing
 ])
+
+"""
+    get_previous_layers(nn, layer)
+
+Returns every layer in the nn that came before given layer including the layer itself.
+
+Note: Technically, we're allowed to skip, say, skip layers here,
+      but right now we might just literally return every previous layer.
+
+TODO: Kill this fn?
+"""
+function get_previous_layers(nn, layer)
+  layer_index = findindex(l -> l.tag == layer.tag, nn)
+  nn[1:layer_index]
+end
+
+"""
+    get_layer_by_tag!(nn, tag)
+
+Gets a layer by tag or raises.
+"""
+function get_layer_by_tag!(nn, tag)
+  layer_index = findfirst(l -> l.tag == tag, nn)
+  if layer_index == nothing
+    error("layer not found \"$tag\"")
+  else
+    nn[layer_index]
+  end
+end
 
 """
   apply_layer(layer, input_values)
@@ -336,7 +377,18 @@ the inference part of training. Returns an array with
 the activations in each layer of the net.
 """
 function calculate_value_with_hidden(nn, input, context)
-  reduce(calculate_next_layer_with_hidden, nn; init=([input], context))
+  (values, next_context) = reduce(calculate_next_layer_with_hidden, nn; init=([input], context))
+  
+  # Just handle weirdness of inputs. This can be smarter!
+  if nn[1].recurrent !== nothing
+    recurrent_values = fetch!(context, nn[1].recurrent, "missing recurrent layer `$(nn[1].recurrent)` in context")
+    # display("values[1]=$(values[1]); recurrent_values=$recurrent_values")
+    values[1] = [values[1]; recurrent_values]
+  else
+    values
+  end
+
+  (values, next_context)
 end
 
 """
@@ -348,15 +400,17 @@ Calculates a step in the forward pass, passing around a
 context value, which is the activation on recurrent layers.
 """
 function calculate_next_layer_with_context((values, context), layer)
-  next_values = if layer.recurrent !== nothing
+  input_values = if layer.recurrent !== nothing
     # display("context=$context")
     recurrent_values = fetch!(context, layer.recurrent, "missing recurrent layer `$(layer.recurrent)` in context")
     # display(values)
     # display(recurrent_values)
-    values = apply_layer(layer, [values; recurrent_values])
+    [values; recurrent_values]
   else
-    apply_layer(layer, values)
+    values
   end
+
+  next_values = apply_layer(layer, input_values)
 
   if layer.feedback
     # TODO: Context is currently being indexed by tags, could we make that better/faster?
@@ -381,7 +435,7 @@ function calculate_value_with_context(nn, input, context)
 end
 
 """
-    backpropagate((debug, cost_derivative, target, ∂E∂yjs, ∂E∂zjs, ∂E∂wijs, prev_layer), ((j, layer), yj, yi))
+    backpropagate((debug, cost_derivative, target, ∂E∂yjs, ∂E∂zjs, ∂E∂wijs, prev_layer), (j, (layer, yj, yi)))
 
 Backpropagate one layer of the net in determining gradients
 
@@ -435,7 +489,7 @@ our stochastic gradient descent step. This value is simply
 use a big outer multiplication to calculate these all in one
 step.
 """
-function backpropagate((debug, cost_derivative, target, ∂E∂yjs, ∂E∂zjs, ∂E∂wijs, prev_layer), ((j, layer), yj, yi))
+function backpropagate((debug, cost_derivative, target, ∂E∂yjs, ∂E∂zjs, ∂E∂wijs, offsets, prev_layer), (j, (layer, yj, yi)))
   if debug
     display("j=$j")
     display("layer=$layer")
@@ -445,14 +499,20 @@ function backpropagate((debug, cost_derivative, target, ∂E∂yjs, ∂E∂zjs, 
     display("∂E∂wijs=$∂E∂wijs")
     display("yj=$yj")
     display("yi=$yi")
+    # display("offsets=$offsets")
   end
+
+  load_layer = length(∂E∂zjs) - layer.skip
 
   ∂E∂yj = if prev_layer === nothing
     # Output layer's gradient is defined by the cost function
     cost_derivative(target, yj)
   else
     # Other layer's are defined by backprop from the previous layer
-    ∂E∂zk = ∂E∂zjs[end]
+    # Previous
+    # TODO: We really need a diff "prev layer" here for skip layers, right?
+    ∂E∂zk = ∂E∂zjs[load_layer]
+    # display("prev_layer_offset=$prev_layer_offset,prev_layer_offset_end=$prev_layer_offset_end,∂E∂zk=$∂E∂zk")
 
     # Calculate `∂E∂yj`, which will be `∂E∂yk` for the next iteration
     if prev_layer.config.type == "softmax"
@@ -461,6 +521,8 @@ function backpropagate((debug, cost_derivative, target, ∂E∂yjs, ∂E∂zjs, 
       # Note: this is really ∂zj∂yi
       ∂E∂zk
     else
+      # prev_weights=eachrow(prev_layer.weights[prev_layer_offset:prev_layer_offset_end,:])
+      # display("prev_weights=$prev_weights")
       # This is the "caching" part of the back propagating algorithm
       # that uses previously calculated values
       # There might be room to make this comprehension even
@@ -469,9 +531,20 @@ function backpropagate((debug, cost_derivative, target, ∂E∂yjs, ∂E∂zjs, 
     end
   end
 
+  # display("load_layer=$load_layer")
+
   # display("∂E∂yj=$∂E∂yj")
 
-  ∂E∂zj = layer.activation_derivative.(yj) .* ∂E∂yj
+  # TODO: Think about this more
+  ∂E∂yj_slim = if length(∂E∂yj) > length(yj)
+    drop(∂E∂yj, length(∂E∂yj) - length(yj))
+  else
+    ∂E∂yj
+  end
+
+  # display("∂E∂yj_slim=$∂E∂yj_slim")
+
+  ∂E∂zj = layer.activation_derivative.(yj) .* ∂E∂yj_slim
 
   # display("∂E∂zj=$∂E∂zj")
 
@@ -483,11 +556,11 @@ function backpropagate((debug, cost_derivative, target, ∂E∂yjs, ∂E∂zjs, 
 
   # display("size(∂E∂wij)=$(size(∂E∂wij))")
 
-  (debug, cost_derivative, target, [∂E∂yjs; [∂E∂yj]], [∂E∂zjs; [∂E∂zj]], [∂E∂wijs; [∂E∂wij]], layer)
+  (debug, cost_derivative, target, [∂E∂yjs; [∂E∂yj]], [∂E∂zjs; [∂E∂zj]], [∂E∂wijs; [∂E∂wij]], [offsets; [0]], layer)
 end
 
 """
-    derive_gradients(embedded_input, target, context, cost, cost_derivative, debug=false)
+    derive_gradients(nn, embedded_input, target, context, cost, cost_derivative, recurrent_layers, recurrent, debug=false)
 
 Build the gradients on the training case
 
@@ -499,16 +572,26 @@ in stochastic gradient descent to train the network.
 We also return the next context, which is used for the next
 run of a RNN.
 """
-function derive_gradients(embedded_input, target, context, cost, cost_derivative, debug=false)
+function derive_gradients(nn, embedded_input, target, context, cost, cost_derivative, recurrent_layers, recurrent, debug=false)
   # display("input=$input")
   # display("target=$target")
   #display("embedded_input=$embedded_input")
 
-  #display("prev_context=$context")
+  # display("recurrent_layers=$recurrent_layers")
 
   (output_with_hidden, next_context) = calculate_value_with_hidden(nn, embedded_input, context)
 
   # display("output_with_hidden=$output_with_hidden")
+  # display("recurrent_layers=$recurrent_layers")
+  # if length(recurrent_layers) > 0
+  #   # Append output from hidden layer
+  #   # But note: this is super hacky
+  #   output_with_hidden[1] = [output_with_hidden[1]; recurrent_layers[end][end]]
+  # end
+  # display("output_with_hidden_post=$output_with_hidden")
+  # TODO: Think about this a bit more
+  # recurrent_layers
+
 
   if debug
     show_output(output_with_hidden)
@@ -520,15 +603,77 @@ function derive_gradients(embedded_input, target, context, cost, cost_derivative
   actual = output_with_hidden[end]
   error = cost(target, actual)
 
-  layer_values = zip(enumerate(nn), output_with_hidden[2:end], output_with_hidden[1:end-1])
-
+  # TODO: I can probably just track the output here a bit differently
+  #       and make this a bit less hacky
+  layer_values = [zip(nn, output_with_hidden[2:end], output_with_hidden[1:end-1])...]
+  all_layer_values = vcat(recurrent_layers, layer_values)
+  # display("all_layer_values=$all_layer_values")
   # display("layer_values=$([layer_values...])")
-  (_, _, _, ∂E∂yis_rev, ∂E∂zis_rev, ∂E∂wijs_rev) = reduce(backpropagate, Iterators.reverse(layer_values); init=(debug, cost_derivative, target, [], [], [], nothing))
+  (_, _, _, ∂E∂yis_rev, ∂E∂zis_rev, ∂E∂wijs_rev) = reduce(backpropagate, Iterators.reverse(enumerate(all_layer_values)); init=(debug, cost_derivative, target, [], [], [], [], nothing))
   ∂E∂yis = Iterators.reverse(∂E∂yis_rev)
   ∂E∂zis = Iterators.reverse(∂E∂zis_rev)
   ∂E∂wijs = Iterators.reverse(∂E∂wijs_rev)
 
-  ([∂E∂wijs...], next_context)
+  next_recurrent_layers = if recurrent
+    # Attach any recurrent layers
+    rlayers = map(nn) do layer
+      if layer.recurrent !== nothing
+        # We want to add this layer and then the deeper layers
+        # The question is: we're getting into parallel layers
+        # which means we might need to treat this more like a graph
+        # but that's _also bad_ since it's more complicated.
+        # We should probably attach the layers at the end, which is... ~fine
+        # But we need to make sure they grab the correct previous layer values!
+        recurrent_layer = get_layer_by_tag!(nn, layer.recurrent) # gets that layer
+        recurrent_layer_index = findfirst(l -> l.tag == recurrent_layer.tag, nn)
+        # display("recurrent_layer_index=$recurrent_layer_index")
+        # display("output_with_hidden=$output_with_hidden")
+        # nn_layers = map(nn) do layer
+        #   (; layer..., skip=1, recurrent=false, tag="$(layer.tag)'")
+        # end
+        # reverse([zip(nn_layers, output_with_hidden[2:end])...][1:recurrent_layer_index])
+
+        # TODO: Ack, how do I mark these as skip layers now?
+        map(layer_values[1:recurrent_layer_index]) do (layer, yj, yi)
+          (
+            (; layer..., skip=0, recurrent=false, tag="$(layer.tag)'"),
+            yj,
+            yi
+          )
+        end
+
+
+        # walk that recurrent layer back to the inputs
+        # we'll need to also attach the outputs for it to our outputs that we'll calcuate
+        # but everything should work fine if we attach everything correctly
+        # which we'll... might be hard. Basically, the best thing to do would be to describe
+        # how the weights connect between layers, even if we process them layer by layer,
+        # we only need to make sure that we're always pre-caching the data we need, but the
+        # exact order isn't that important.
+        # This will also allow us to implement skip-layer connections, which is really what we're doing here!
+
+        # Now, we might need to modify those a bit, since they are false layers
+        # so a) the tags are probably off, and b) we need to attach outputs to them, since
+        # otherwise we won't track that
+
+        # We'll need to map over them to get them to be normalish, and ... this should work
+        # Except for the final piece: we'll need to recombine the layers when we derive gradients
+
+        # I could try to do this via real weight constraints, and then via tag combine things
+        # This would be more versitile, but overall, it's just super hard with matrix sizes, etc
+        # So for now it's probably easier to just handle it layer by layer, since averaging gradients
+        # is super easy to do.
+      else
+        []
+      end
+    end
+
+    vcat(rlayers...)
+  else
+    []
+  end
+
+  ([∂E∂wijs...], next_context, vcat(recurrent_layers, next_recurrent_layers))
 end
 
 """
@@ -602,6 +747,12 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       # TODO: Handle this better?
       # display("training=$training")
       # display("case=$case")
+      case = if case == nothing
+        rand(training)[begin]
+      else
+        case
+      end
+
       (steps, targets) = get_case(case)
       [zip(steps, targets)...]
     else
@@ -619,16 +770,37 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
     # display("inputs=$inputs $(length(inputs))")
 
     gradients = if recurrent
-      (gradients, _) = reduce(inputs, init=([], initial_context(nn))) do (acc, context), (input, target)
-        (gradient, next_context) = derive_gradients(apply_embedding(input), target, context, cost, cost_derivative, debug)
-        #display("acc=$acc,gradient=$gradient")
-        ([acc; [gradient]], next_context)
+      (gradients, _) = reduce(inputs, init=([], initial_context(nn), [])) do (acc, context, recurrent_layers), (input, target)
+        # We're going to build back the entire net as if it were feed-forward on subsequent steps
+        # We'll then have to piece it back together down below
+        (gradient, next_context, next_recurrent_layers) = derive_gradients(nn, apply_embedding(input), target, context, cost, cost_derivative, recurrent_layers, recurrent, debug)
+        
+        # TODO: This is obviously all a mess!
+        # display("gradient=$gradient")
+        all_layers=map(l -> l.config.tag, [map(layer -> layer[begin], recurrent_layers); nn])
+        # display("all_layers=$all_layers")
+        gradient_pairs = drop_right([zip(all_layers, gradient)...], length(nn))
+        gradient_full = map(enumerate(nn)) do (j, layer)
+          # display("gradient_pairs=$gradient_pairs")
+          gradient_j = gradient[j+length(recurrent_layers)]
+          subs = [gradient for (tag, gradient) ∈ gradient_pairs if tag == layer.tag]
+          # display("$(layer.tag) gradient[$j]=$(gradient_j),subs=$(subs)")
+          if length(subs) > 0
+            # display("gradient[$j] with subs=$(mean([subs; [gradient_j]]))")
+            mean([subs; [gradient_j]])
+          else
+            gradient_j
+          end
+        end
+        # We're going to merge gradients here for recurrent layers
+        # display("acc=$acc,gradient=$gradient,gradient_full=$gradient_full")
+        ([acc; [gradient_full]], next_context, next_recurrent_layers)
       end
 
       gradients
     else
       map(inputs) do (input, target)
-        (gradient, _) = derive_gradients(apply_embedding(input), target, Dict(), cost, cost_derivative, debug)
+        (gradient, _) = derive_gradients(nn, apply_embedding(input), target, Dict(), cost, cost_derivative, debug)
         # display("gradient=$gradient")
         gradient
       end
@@ -646,6 +818,7 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
       if layer.weights == nothing
         layer
       else
+        # display("∂E∂wijs=$∂E∂wijs")
         # display("layer=$(layer.tag), weights=$(layer.weights),∂E∂wijs=$(mean(∂E∂wijs))")
         ∆weight = -ϵ .* layer.apply_weight_constraints(mean(∂E∂wijs))
         weights_adj = layer.weights .+ ∆weight
