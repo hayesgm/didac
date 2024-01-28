@@ -678,7 +678,9 @@ function derive_gradients(nn, embedded_input, target, context, cost, cost_deriva
 end
 
 """
-  build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_fn="squared-difference", ϵ=0.01, network_config=nothing, recurrent=false)
+    build_nn(; network_layers, training, embedding=nothing, show_fn=display, cost_fn="squared-difference", ϵ=0.01, network_config=nothing, recurrent=false)
+
+  build_nn(; network_layers, training, embedding=nothing, show_fn=display, cost_fn="squared-difference", ϵ=0.01, network_config=nothing, recurrent=false)
 
 Build a neural network with given parameters.
 
@@ -700,15 +702,16 @@ weights, and then to infer on the final network.
 Note: we don't currently have any framework to store the weights
       of a network, but we'll expect to build that soon.s
 """
-function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_fn="squared-difference", ϵ=0.01, network_config=nothing, recurrent=false)
+function build_nn(; network_layers, training, embedding=nothing, show_fn=display, cost_fn="squared-difference", ϵ=0.01, network_config=nothing, recurrent=false)
   # Embedding maps the user-defined input (grammar) to a vector space.
   # This function is a helper so we can broadcast over inputs,
   # e.g. `apply_embedding.(["a", "b"]) = [[1, 0, 0], [0, 1, 0]]`
-  apply_embedding(k) = embedding[k]
+  apply_embedding(k) = embedding == nothing ? k : embedding[k]
 
   # We want to determine the size of the input embedding. The current
   # strategy here is to grab the a random embedding's value.
-  input_sz = length(iterate(embedding)[begin][end])
+  # TODO: I think this yet again breaks RNN. We need to just specify input length, right?
+  input_sz = length(apply_embedding(iterate(training)[begin][begin]))
 
   # We initialize the neural network. The neural network is an array
   # of layers in the network. This includes loading weights for each
@@ -717,13 +720,6 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
 
   # Grab the cost function and make sure it exists. See `Cost Functions` above.
   (cost, cost_derivative) = fetch!(cost_fns, cost_fn, "unknown cost function: $cost_fn")
-
-  # The grammar is simply the pre-embedded inputs, e.g. "a", "b"
-  grammar = keys(embedding)
-
-  # If for any reason we want to take an embedded input and convert
-  # it back to the grammar. This isn't currently used.
-  inverse_embedding = Dict([(v, k) for (k, v) ∈ pairs(embedding)])
 
   # Helper function to pull a specific training case from our
   # training dictionary.
@@ -847,8 +843,8 @@ function build_nn(; network_layers, embedding, training, show_fn=show_fn, cost_f
   otherwise `nothing`.
   """
   function try_check_error((input, actual))
-    if haskey(training, input)
-      cost(get(training, input, nothing), actual)
+    if haskey(Dict(training), input)
+      cost(get(Dict(training), input, nothing), actual)
     else
       nothing
     end

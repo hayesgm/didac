@@ -39,9 +39,9 @@ end
 
 (nn, train, infer) = build_nn(
   network_layers=[
-    (type="relu", nodes=4),
-    (type="relu", nodes=3),
-    (type="relu", nodes=3)
+    (type="sigmoid", nodes=4),
+    (type="sigmoid", nodes=3),
+    (type="sigmoid", nodes=3)
   ],
   embedding=embedding,
   training=training,
@@ -51,7 +51,7 @@ end
 )
 
 for i ∈ 1:10
-  for j ∈ 1:10000
+  for j ∈ 1:2000
     global nn = train(nn)
   end
 
